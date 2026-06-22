@@ -2,35 +2,18 @@ from __future__ import annotations
 
 import copy
 import os
+import random
 import re
 import sys
 from pathlib import Path
 import time
 
+from dotenv import load_dotenv
 import yaml
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 
-
-def _load_dotenv(path: Path) -> None:
-    if not path.exists() or path.is_dir():
-        return
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[7:].strip()
-        if "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = value
-
-
-_load_dotenv(BASE_DIR / ".env")
+load_dotenv(BASE_DIR / ".env", override=False)
 
 DATA_DIR = BASE_DIR / "data"
 CONFIG_FILE = Path(os.getenv("CHATGPT2API_CONFIG_FILE") or BASE_DIR / "config.yaml")
@@ -92,7 +75,18 @@ DEFAULT_THIRD_PARTY_APPS = {
     },
 }
 
-CODEX_CHANNEL_UPSTREAM_MODELS = {"gpt-5.5", "gpt-5.4", "gpt-5.4-mini"}
+CODEX_SYSTEM_CHANNEL_ID = "system"
+CODEX_SYSTEM_TYPE = "system"
+CODEX_TOOL_CALL_TYPE = "tool_call"
+CODEX_CHANNEL_TYPES = {CODEX_SYSTEM_TYPE, CODEX_TOOL_CALL_TYPE}
+CODEX_SYSTEM_MODEL = "gpt-image-2"
+CODEX_SYSTEM_MODELS = [
+    CODEX_SYSTEM_MODEL,
+    "codex-gpt-image-2",
+    "plus-codex-gpt-image-2",
+    "team-codex-gpt-image-2",
+    "pro-codex-gpt-image-2",
+]
 DEFAULT_CODEX_CHANNELS = {
     "channels": [],
 }
@@ -265,30 +259,75 @@ def _normalize_third_party_apps_settings(value: object) -> dict[str, object]:
     }
 
 
+def _normalize_model_mappings(value: object) -> list[str]:
+    if isinstance(value, list):
+        items = value
+    elif isinstance(value, str):
+        items = re.split(r"[,\s]+", value)
+    else:
+        items = []
+    models: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        model = str(item or "").strip()
+        normalized = model.lower()
+        if model and normalized not in seen:
+            seen.add(normalized)
+            models.append(model)
+    return models
+
+
+def _normalize_mapped_model(channel: dict) -> str:
+    direct = str(channel.get("mapped_model") or "").strip()
+    if direct:
+        return direct
+    mappings = _normalize_model_mappings(channel.get("mapped_models"))
+    return mappings[0] if mappings else ""
+
+
+def _normalize_codex_channel_type(channel: dict) -> str:
+    if channel.get("system") or str(channel.get("id") or "").strip() == CODEX_SYSTEM_CHANNEL_ID:
+        return CODEX_SYSTEM_TYPE
+    channel_type = str(channel.get("type") or "").strip().lower()
+    return channel_type if channel_type in CODEX_CHANNEL_TYPES else CODEX_TOOL_CALL_TYPE
+
+
 def _normalize_codex_channels_settings(value: object) -> dict[str, object]:
     source = value if isinstance(value, dict) else {}
     items = source.get("channels") if isinstance(source.get("channels"), list) else []
     channels: list[dict[str, object]] = []
-    seen_models: set[str] = set()
+    system_source = next((
+        item for item in items
+        if isinstance(item, dict) and _normalize_codex_channel_type(item) == CODEX_SYSTEM_TYPE
+    ), {})
+    channels.append({
+        "id": CODEX_SYSTEM_CHANNEL_ID,
+        "type": CODEX_SYSTEM_TYPE,
+        "enabled": True,
+        "name": "系统渠道",
+        "weight": _normalize_positive_int((system_source if isinstance(system_source, dict) else {}).get("weight"), 1, 0),
+        "mapped_models": CODEX_SYSTEM_MODELS,
+        "mapped_model": CODEX_SYSTEM_MODEL,
+    })
     for index, item in enumerate(items):
         channel = item if isinstance(item, dict) else {}
+        channel_type = _normalize_codex_channel_type(channel)
+        if channel_type == CODEX_SYSTEM_TYPE:
+            continue
         prefix = str(channel.get("model_prefix") or "").strip().lower()
         prefix = re.sub(r"[^a-z0-9._-]+", "-", prefix).strip("-")
-        mapped_model = f"{prefix}-gpt-image-2" if prefix else ""
-        if mapped_model and mapped_model in seen_models:
-            continue
-        upstream_model = str(channel.get("upstream_model") or "gpt-5.5").strip()
-        if upstream_model not in CODEX_CHANNEL_UPSTREAM_MODELS:
-            upstream_model = "gpt-5.5"
-        if mapped_model:
-            seen_models.add(mapped_model)
+        mapped_model = _normalize_mapped_model(channel) or (f"{prefix}-gpt-image-2" if prefix else "gpt-image-2")
+        upstream_model = str(channel.get("upstream_model") or "gpt-5.5").strip() or "gpt-5.5"
         channels.append({
             "id": str(channel.get("id") or f"channel-{index + 1}").strip() or f"channel-{index + 1}",
+            "type": channel_type,
             "enabled": _normalize_bool(channel.get("enabled"), False),
             "name": str(channel.get("name") or "").strip(),
             "base_url": str(channel.get("base_url") or "").strip().rstrip("/"),
             "api_key": str(channel.get("api_key") or "").strip(),
             "upstream_model": upstream_model,
+            "weight": _normalize_positive_int(channel.get("weight"), 1, 0),
+            "mapped_models": [mapped_model],
             "model_prefix": prefix,
             "mapped_model": mapped_model,
         })
@@ -562,17 +601,28 @@ class ConfigStore:
             for channel in channels
             if isinstance(channel, dict)
                and _normalize_bool(channel.get("enabled"), False)
-               and str(channel.get("base_url") or "").strip()
-               and str(channel.get("api_key") or "").strip()
-               and str(channel.get("mapped_model") or "").strip()
+               and _normalize_positive_int(channel.get("weight"), 1, 0) > 0
+               and isinstance(channel.get("mapped_models"), list)
+               and channel.get("mapped_models")
+               and (str(channel.get("type") or "").strip() == CODEX_SYSTEM_TYPE or (
+                    str(channel.get("base_url") or "").strip()
+                    and str(channel.get("api_key") or "").strip()
+               ))
+        ]
+
+    def list_codex_channels_for_model(self, model: object) -> list[dict[str, object]]:
+        normalized = str(model or "").strip().lower()
+        return [
+            channel
+            for channel in self.list_enabled_codex_channels()
+            if normalized in {str(item or "").strip().lower() for item in channel.get("mapped_models", [])}
         ]
 
     def get_codex_channel_for_model(self, model: object) -> dict[str, object] | None:
-        normalized = str(model or "").strip().lower()
-        for channel in self.list_enabled_codex_channels():
-            if str(channel.get("mapped_model") or "").strip().lower() == normalized:
-                return channel
-        return None
+        channels = self.list_codex_channels_for_model(model)
+        if not channels:
+            return None
+        return random.choices(channels, weights=[_normalize_positive_int(channel.get("weight"), 1, 0) for channel in channels], k=1)[0]
 
     def update(self, data: dict[str, object]) -> dict[str, object]:
         next_data = dict(self.data)

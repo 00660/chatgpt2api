@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from api.support import require_admin, require_identity, resolve_image_base_url
+from services.codex_api import CodexAPI
 from services.config import DATA_DIR, config
 from services.image_service import (
     compress_images,
@@ -57,14 +58,24 @@ class ClearanceTestRequest(BaseModel):
     target_url: str = "https://chatgpt.com"
 
 
+class CodexChannelTestRequest(BaseModel):
+    type: str = "tool_call"
+    base_url: str = ""
+    api_key: str = ""
+    upstream_model: str = "gpt-5.5"
+    prompt: str = "生成一只鸡"
+
+
 class ImageDeleteRequest(BaseModel):
     paths: list[str] = []
     start_date: str = ""
     end_date: str = ""
     all_matching: bool = False
 
+
 class ImageDownloadRequest(BaseModel):
     paths: list[str]
+
 
 class LogDeleteRequest(BaseModel):
     ids: list[str] = []
@@ -72,6 +83,31 @@ class LogDeleteRequest(BaseModel):
 
 def create_router(app_version: str) -> APIRouter:
     router = APIRouter()
+
+    def codex_channel_test(body: CodexChannelTestRequest) -> dict[str, object]:
+        events = list(CodexAPI(body.base_url, body.api_key, body.upstream_model, body.type).iter_image_response_events(
+            body.prompt,
+            size="1024x1024",
+            quality="auto",
+        ))
+        images: list[str] = []
+
+        def collect(value: object) -> None:
+            if isinstance(value, dict):
+                if value.get("type") == "image_generation_call" and isinstance(value.get("result"), str):
+                    result = value["result"].strip()
+                    if result:
+                        images.append(result.split(",", 1)[1] if result.startswith("data:image/") else result)
+                for item in value.values():
+                    collect(item)
+            elif isinstance(value, list):
+                for item in value:
+                    collect(item)
+
+        collect(events)
+        if not images:
+            raise RuntimeError("No image result found in response")
+        return {"ok": True, "image": images[0]}
 
     @router.post("/auth/login")
     async def login(authorization: str | None = Header(default=None)):
@@ -107,7 +143,8 @@ def create_router(app_version: str) -> APIRouter:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 
     @router.get("/api/images")
-    async def get_images(request: Request, start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):
+    async def get_images(request: Request, start_date: str = "", end_date: str = "",
+                         authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return list_images(resolve_image_base_url(request), start_date=start_date.strip(), end_date=end_date.strip())
 
@@ -118,7 +155,8 @@ def create_router(app_version: str) -> APIRouter:
     @router.post("/api/images/delete")
     async def delete_images_endpoint(body: ImageDeleteRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return delete_images(body.paths, start_date=body.start_date.strip(), end_date=body.end_date.strip(), all_matching=body.all_matching)
+        return delete_images(body.paths, start_date=body.start_date.strip(), end_date=body.end_date.strip(),
+                             all_matching=body.all_matching)
 
     @router.post("/api/images/download")
     async def download_images_endpoint(body: ImageDownloadRequest, authorization: str | None = Header(default=None)):
@@ -136,7 +174,8 @@ def create_router(app_version: str) -> APIRouter:
         return get_image_download_response(image_path)
 
     @router.get("/api/logs")
-    async def get_logs(type: str = "", start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):
+    async def get_logs(type: str = "", start_date: str = "", end_date: str = "",
+                       authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"items": log_service.list(type=type.strip(), start_date=start_date.strip(), end_date=end_date.strip())}
 
@@ -159,7 +198,8 @@ def create_router(app_version: str) -> APIRouter:
         }
 
     @router.post("/api/proxy/runtime")
-    async def save_proxy_runtime_endpoint(body: SettingsUpdateRequest, authorization: str | None = Header(default=None)):
+    async def save_proxy_runtime_endpoint(body: SettingsUpdateRequest,
+                                          authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
             config.update({"proxy_runtime": body.model_dump(mode="python")})
@@ -171,9 +211,19 @@ def create_router(app_version: str) -> APIRouter:
         }
 
     @router.post("/api/proxy/clearance/test")
-    async def test_proxy_clearance_endpoint(body: ClearanceTestRequest, authorization: str | None = Header(default=None)):
+    async def test_proxy_clearance_endpoint(body: ClearanceTestRequest,
+                                            authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"result": await run_in_threadpool(test_clearance, body.target_url)}
+
+    @router.post("/api/codex-channels/test")
+    async def test_codex_channel_endpoint(body: CodexChannelTestRequest,
+                                          authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {"result": await run_in_threadpool(codex_channel_test, body)}
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
 
     @router.get("/api/storage/info")
     async def get_storage_info(authorization: str | None = Header(default=None)):
@@ -208,21 +258,20 @@ def create_router(app_version: str) -> APIRouter:
 
     @router.post("/api/images/storage/cleanup-to-target")
     async def cleanup_to_target(
-        target_free_mb: int = 500,
-        dry_run: bool = False,
-        authorization: str | None = Header(default=None),
+            target_free_mb: int = 500,
+            dry_run: bool = False,
+            authorization: str | None = Header(default=None),
     ):
         require_admin(authorization)
         return await run_in_threadpool(delete_to_target, target_free_mb, dry_run)
 
-    @router.get("/health", response_model=None)
-    async def health_dashboard(format: str = Query(default="html")):
+    @router.get("/api/health")
+    async def health_dashboard():
         from services.account_service import account_service as acct_svc
         stats = acct_svc.get_stats()
         storage_health = _json_storage_health()
         healthy = stats["active"] > 0 or stats["unlimited_quota_count"] > 0
-
-        stats_json = {
+        return {
             "status": "ok" if healthy else "degraded",
             "healthy": healthy,
             "version": app_version,
@@ -230,58 +279,5 @@ def create_router(app_version: str) -> APIRouter:
             "proxy_runtime": proxy_settings.get_runtime_status(),
             "accounts": stats,
         }
-        if format == "json":
-            return stats_json
-        return HTMLResponse(f"""<!DOCTYPE html>
-<html lang="zh">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>号池健康监控 - chatgpt2api</title>
-<style>
-*{{margin:0;padding:0;box-sizing:border-box}}
-body{{font-family:system-ui,-apple-system,sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh}}
-.header{{background:#1a1d27;border-bottom:1px solid #2a2d3a;padding:16px 24px;display:flex;justify-content:space-between;align-items:center}}
-.header h1{{font-size:20px}}
-.status-dot{{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:8px}}
-.status-ok{{background:#22c55e;box-shadow:0 0 8px #22c55e88}}
-.status-degraded{{background:#f59e0b;box-shadow:0 0 8px #f59e0b88}}
-.container{{max-width:960px;margin:0 auto;padding:24px}}
-.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:24px}}
-.card{{background:#1a1d27;border:1px solid #2a2d3a;border-radius:10px;padding:16px}}
-.card .value{{font-size:28px;font-weight:700;margin:4px 0}}
-.card .label{{font-size:13px;color:#94a3b8}}
-.green{{color:#22c55e}}.yellow{{color:#f59e0b}}.red{{color:#ef4444}}.blue{{color:#6c63ff}}
-table{{width:100%;border-collapse:collapse;background:#1a1d27;border:1px solid #2a2d3a;border-radius:10px;overflow:hidden}}
-th{{background:#242836;font-weight:600;text-align:left;padding:10px 12px;font-size:12px;color:#94a3b8;text-transform:uppercase}}
-td{{padding:8px 12px;border-top:1px solid #2a2d3a;font-size:14px}}tr:hover td{{background:rgba(108,99,255,.05)}}
-.api-url{{font-family:monospace;font-size:12px;color:#6c63ff}}
-.refresh{{font-size:12px;color:#64748b;text-align:center;margin-top:24px}}
-</style>
-<meta http-equiv="refresh" content="30">
-</head>
-<body>
-<div class="header">
-<h1><span class="status-dot {'status-ok' if healthy else 'status-degraded'}"></span>号池健康监控</h1>
-<div style="font-size:13px;color:#94a3b8">v{app_version} · 30s 自动刷新</div>
-</div>
-<div class="container">
-<div class="cards">
-<div class="card"><div class="label">号池状态</div><div class="value {'green' if healthy else 'yellow'}">{'正常' if healthy else '异常'}</div></div>
-<div class="card"><div class="label">当前账号</div><div class="value blue">{stats['total']}</div></div>
-<div class="card"><div class="label">累计入库</div><div class="value">{stats['cumulative_total']}</div></div>
-<div class="card"><div class="label">可用账号</div><div class="value green">{stats['active']}</div></div>
-<div class="card"><div class="label">无限额</div><div class="value">{stats['unlimited_quota_count']}</div></div>
-<div class="card"><div class="label">剩余额度</div><div class="value">{stats['total_quota']}</div></div>
-<div class="card"><div class="label">限流</div><div class="value yellow">{stats['limited']}</div></div>
-<div class="card"><div class="label">异常</div><div class="value red">{stats['abnormal']}</div></div>
-<div class="card"><div class="label">禁用</div><div class="value">{stats['disabled']}</div></div>
-<div class="card"><div class="label">成功/失败</div><div class="value">{stats['total_success']}<span style="font-size:18px;color:#94a3b8">/</span><span class="red">{stats['total_fail']}</span></div></div>
-</div>
-<h2 style="margin-bottom:12px;font-size:16px">账号类型分布</h2>
-<table>
-<tr><th>类型</th><th>数量</th></tr>
-{''.join(f'<tr><td>{t}</td><td>{c}</td></tr>' for t,c in sorted(stats['by_type'].items()))}
-</table>
-<div class="refresh">JSON: <span class="api-url">/health?format=json</span></div>
-</div></body></html>""")
 
     return router

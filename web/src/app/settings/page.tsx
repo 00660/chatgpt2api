@@ -7,7 +7,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 import { ConfigCard, ContentReviewCard, ImageSettingsCard } from "./components/config-card";
-import { CodexChannelsCard } from "./components/codex-channels-card";
 import { CPAPoolDialog } from "./components/cpa-pool-dialog";
 import { CPAPoolsCard } from "./components/cpa-pools-card";
 import { ImportBrowserDialog } from "./components/import-browser-dialog";
@@ -22,7 +21,6 @@ const settingsTabs = [
   { value: "basic", title: "基础配置" },
   { value: "review", title: "内容审核" },
   { value: "image", title: "图片设置" },
-  { value: "codex", title: "渠道设置" },
   { value: "keys", title: "用户密钥" },
   { value: "canvas", title: "画布入口" },
   { value: "proxy", title: "FlareSolverr" },
@@ -85,9 +83,6 @@ function SettingsPageContent() {
         </TabsContent>
         <TabsContent value="image">
           <ImageSettingsCard />
-        </TabsContent>
-        <TabsContent value="codex">
-          <CodexChannelsCard />
         </TabsContent>
         <TabsContent value="proxy">
           <ProxyRuntimeCard />

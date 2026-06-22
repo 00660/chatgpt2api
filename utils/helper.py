@@ -137,6 +137,12 @@ def is_image_chat_request(body: dict[str, object]) -> bool:
     modalities = body.get("modalities")
     if is_supported_image_model(model):
         return True
+    try:
+        from services.config import config
+        if config.list_codex_channels_for_model(model):
+            return True
+    except Exception:
+        pass
     return isinstance(modalities, list) and "image" in {str(item or "").strip().lower() for item in modalities}
 
 

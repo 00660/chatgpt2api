@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from services.account_service import account_service
-from services.config import config
+from services.config import CODEX_SYSTEM_TYPE, config
 from services.openai_backend_api import OpenAIBackendAPI
 from utils.helper import CODEX_IMAGE_MODEL
 
@@ -21,6 +21,14 @@ def list_models() -> dict[str, Any]:
         for account in accounts
         if isinstance(account, dict)
     ]
+    channels = config.list_enabled_codex_channels()
+    system_models = {
+        str(model or "").strip()
+        for channel in channels
+        if channel.get("type") == CODEX_SYSTEM_TYPE
+        for model in channel.get("mapped_models", [])
+        if str(model or "").strip()
+    }
     codex_types = {
         normalized
         for account in accounts
@@ -29,20 +37,23 @@ def list_models() -> dict[str, Any]:
            and (normalized := account_service._normalize_account_type(account.get("type")))
     }
 
-    if web_image_accounts:
+    if web_image_accounts and "gpt-image-2" in system_models:
         dynamic_models.add("gpt-image-2")
-    if codex_types & {"Plus", "Team", "Pro"}:
+    if codex_types & {"Plus", "Team", "Pro"} and CODEX_IMAGE_MODEL in system_models:
         dynamic_models.add(CODEX_IMAGE_MODEL)
-    if "Plus" in codex_types:
+    if "Plus" in codex_types and f"plus-{CODEX_IMAGE_MODEL}" in system_models:
         dynamic_models.add(f"plus-{CODEX_IMAGE_MODEL}")
-    if "Team" in codex_types:
+    if "Team" in codex_types and f"team-{CODEX_IMAGE_MODEL}" in system_models:
         dynamic_models.add(f"team-{CODEX_IMAGE_MODEL}")
-    if "Pro" in codex_types:
+    if "Pro" in codex_types and f"pro-{CODEX_IMAGE_MODEL}" in system_models:
         dynamic_models.add(f"pro-{CODEX_IMAGE_MODEL}")
-    for channel in config.list_enabled_codex_channels():
-        mapped_model = str(channel.get("mapped_model") or "").strip()
-        if mapped_model:
-            dynamic_models.add(mapped_model)
+    for channel in channels:
+        if channel.get("type") == CODEX_SYSTEM_TYPE:
+            continue
+        for model in channel.get("mapped_models", []):
+            mapped_model = str(model or "").strip()
+            if mapped_model:
+                dynamic_models.add(mapped_model)
 
     for model in sorted(dynamic_models):
         if model not in seen:

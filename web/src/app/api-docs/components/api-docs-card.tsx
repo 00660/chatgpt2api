@@ -7,6 +7,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { SystemModels } from "@/components/system-models";
 import webConfig from "@/constants/common-env";
 import { getStoredAuthSession } from "@/store/auth";
+import { SkillPanel } from "@/app/debug/components/skill-panel";
 
 type ParamRow = [string, string, string];
 
@@ -295,6 +296,23 @@ export function ApiDocsCard() {
         />
 
         <div className="space-y-3">
+          <details className="group rounded-xl border border-stone-200 bg-white px-4 py-3">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+              <span className="flex min-w-0 items-center gap-3">
+                <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-stone-100 text-stone-600">
+                  <ListChecks className="size-4" />
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-sm font-semibold text-stone-900">搜索Skills</span>
+                  <span className="mt-1 block truncate font-mono text-xs text-stone-500">生成本地搜索 Skill 安装指令</span>
+                </span>
+              </span>
+              <ChevronDown className="size-4 shrink-0 text-stone-400 transition group-open:rotate-180" />
+            </summary>
+            <div className="mt-4">
+              <SkillPanel />
+            </div>
+          </details>
           {docs.map((item) => {
             const Icon = item.icon;
             return (

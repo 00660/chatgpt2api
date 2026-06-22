@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useState, type ReactNode } from "react";
-import { BookOpenText, Bot, Bug, FileText, Image, Images, LogOut, Menu, Palette, PanelLeftClose, PanelLeftOpen, Settings, UserPlus, type LucideIcon } from "lucide-react";
+import { BookOpenText, Bot, FileSearch, FileText, Image, Images, LogOut, Menu, MessageSquareText, Palette, PanelLeftClose, PanelLeftOpen, Presentation, Settings, UserPlus, Workflow, type LucideIcon } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -21,18 +21,44 @@ type NavItem = {
   icon: LucideIcon;
 };
 
-const adminNavItems: NavItem[] = [
-  { href: "/image", label: "生图", icon: Image },
-  { href: "/accounts", label: "号池管理", icon: Bot },
-  { href: "/register", label: "注册机", icon: UserPlus },
-  { href: "/image-manager", label: "图片管理", icon: Images },
-  { href: "/logs", label: "日志管理", icon: FileText },
-  { href: "/api-docs", label: "接口文档", icon: BookOpenText },
-  { href: "/debug", label: "调试", icon: Bug },
-  { href: "/settings", label: "设置", icon: Settings },
+type NavGroup = {
+  title: string;
+  items: NavItem[];
+};
+
+const adminNavGroups: NavGroup[] = [
+  {
+    title: "应用",
+    items: [
+      { href: "/chat", label: "对话", icon: MessageSquareText },
+      { href: "/image", label: "生图", icon: Image },
+      { href: "/ppt", label: "PPT生成", icon: Presentation },
+      { href: "/psd", label: "PSD生成", icon: FileSearch },
+    ],
+  },
+  {
+    title: "管理",
+    items: [
+      { href: "/accounts", label: "号池管理", icon: Bot },
+      { href: "/channels", label: "渠道设置", icon: Workflow },
+      { href: "/register", label: "注册机", icon: UserPlus },
+      { href: "/image-manager", label: "图片管理", icon: Images },
+      { href: "/logs", label: "日志管理", icon: FileText },
+      { href: "/api-docs", label: "接口文档", icon: BookOpenText },
+      { href: "/settings", label: "设置", icon: Settings },
+    ],
+  },
 ];
 
-const userNavItems: NavItem[] = [{ href: "/image", label: "画图", icon: Image }];
+const userNavGroups: NavGroup[] = [
+  {
+    title: "应用",
+    items: [
+      { href: "/chat", label: "对话", icon: MessageSquareText },
+      { href: "/image", label: "画图", icon: Image },
+    ],
+  },
+];
 
 function buildThirdPartyHref(appUrl: string, baseUrl: string, apiKey: string) {
   const url = appUrl.trim();
@@ -121,7 +147,7 @@ export function TopNav({
     return null;
   }
 
-  const navItems = session.role === "admin" ? adminNavItems : userNavItems;
+  const navGroups = session.role === "admin" ? adminNavGroups : userNavGroups;
   const roleLabel = session.role === "admin" ? "管理员" : "普通用户";
   const displayName = session.name.trim() || roleLabel;
   const baseUrl = webConfig.apiUrl.replace(/\/$/, "") || window.location.origin;
@@ -144,7 +170,7 @@ export function TopNav({
 
   const navigation = (
     <SidebarContent
-      navItems={navItems}
+      navGroups={navGroups}
       pathname={pathname}
       roleLabel={roleLabel}
       displayName={displayName}
@@ -170,7 +196,7 @@ export function TopNav({
                 <SheetTitle>ChatGPT2API 导航</SheetTitle>
               </SheetHeader>
               <SidebarContent
-                navItems={navItems}
+                navGroups={navGroups}
                 pathname={pathname}
                 roleLabel={roleLabel}
                 displayName={displayName}
@@ -245,7 +271,7 @@ export function TopNav({
 }
 
 function SidebarContent({
-  navItems,
+  navGroups,
   pathname,
   roleLabel,
   displayName,
@@ -255,7 +281,7 @@ function SidebarContent({
   collapsed = false,
   closeOnSelect,
 }: {
-  navItems: NavItem[];
+  navGroups: NavGroup[];
   pathname: string;
   roleLabel: string;
   displayName: string;
@@ -299,44 +325,49 @@ function SidebarContent({
         </div>
       ) : null}
 
-      <nav className={cn("flex flex-1 flex-col gap-1", collapsed ? "mt-5 w-full items-center" : "mt-5")}>
-        {canvasHref ? (
-          wrapItem(
-            <button
-              type="button"
-              className={cn(
-                "flex h-10 items-center rounded-lg text-left text-sm font-medium text-stone-600 transition hover:bg-stone-100 hover:text-stone-950 dark:text-stone-300 dark:hover:bg-white/10 dark:hover:text-white",
+      <nav className={cn("flex flex-1 flex-col", collapsed ? "mt-5 w-full items-center gap-4" : "mt-5 gap-5")}>
+        {navGroups.map((group) => (
+          <div key={group.title} className={cn(collapsed ? "flex w-full flex-col items-center gap-1" : "space-y-1")}>
+            {!collapsed ? <div className="px-3 pb-1 text-[11px] font-semibold tracking-[0.18em] text-stone-400 uppercase dark:text-stone-500">{group.title}</div> : null}
+            {group.title === "应用" && canvasHref ? (
+              wrapItem(
+                <button
+                  type="button"
+                  className={cn(
+                    "flex h-10 items-center rounded-lg text-left text-sm font-medium text-stone-600 transition hover:bg-stone-100 hover:text-stone-950 dark:text-stone-300 dark:hover:bg-white/10 dark:hover:text-white",
+                    collapsed ? "w-10 justify-center" : "w-full gap-3 px-3",
+                  )}
+                  onClick={onCanvasOpen}
+                  title="无限画布"
+                >
+                  <Palette className="size-4 shrink-0" />
+                  {!collapsed ? "无限画布" : null}
+                </button>
+              )
+            ) : null}
+            {group.items.map((item) => {
+              const active = pathname === item.href;
+              const Icon = item.icon;
+              const className = cn(
+                "flex h-10 items-center rounded-lg text-sm font-medium transition",
                 collapsed ? "w-10 justify-center" : "w-full gap-3 px-3",
-              )}
-              onClick={onCanvasOpen}
-              title="无限画布"
-            >
-              <Palette className="size-4 shrink-0" />
-              {!collapsed ? "无限画布" : null}
-            </button>
-          )
-        ) : null}
-        {navItems.map((item) => {
-          const active = pathname === item.href;
-          const Icon = item.icon;
-          const className = cn(
-            "flex h-10 items-center rounded-lg text-sm font-medium transition",
-            collapsed ? "w-10 justify-center" : "w-full gap-3 px-3",
-            active
-              ? "bg-stone-950 text-white dark:bg-white dark:text-stone-950"
-              : "text-stone-600 hover:bg-stone-100 hover:text-stone-950 dark:text-stone-300 dark:hover:bg-white/10 dark:hover:text-white",
-          );
-          return (
-            <Fragment key={item.href}>
-              {wrapItem(
-                <Link to={item.href} className={className} title={item.label}>
-                  <Icon className="size-4 shrink-0" />
-                  {!collapsed ? item.label : null}
-                </Link>,
-              )}
-            </Fragment>
-          );
-        })}
+                active
+                  ? "bg-stone-950 text-white dark:bg-white dark:text-stone-950"
+                  : "text-stone-600 hover:bg-stone-100 hover:text-stone-950 dark:text-stone-300 dark:hover:bg-white/10 dark:hover:text-white",
+              );
+              return (
+                <Fragment key={item.href}>
+                  {wrapItem(
+                    <Link to={item.href} className={className} title={item.label}>
+                      <Icon className="size-4 shrink-0" />
+                      {!collapsed ? item.label : null}
+                    </Link>,
+                  )}
+                </Fragment>
+              );
+            })}
+          </div>
+        ))}
       </nav>
 
       <div className={cn("mt-5 space-y-2 border-t border-stone-200/80 pt-3 dark:border-white/10", collapsed ? "w-full" : "")}>

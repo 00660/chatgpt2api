@@ -145,9 +145,13 @@ function dataUrlToFile(dataUrl: string, fileName: string, mimeType?: string) {
 }
 
 function filterImageModels(items: Model[]): ImageModel[] {
-  return items
-    .map((item) => String(item.id || "").trim())
-    .filter((id, index, list) => id.toLowerCase().includes("image") && list.indexOf(id) === index);
+  const seen = new Set<string>();
+  return items.flatMap((item) => {
+    const id = String(item.id || "").trim();
+    if (!id || seen.has(id) || (!id.toLowerCase().includes("image") && item.owned_by !== "chatgpt2api")) return [];
+    seen.add(id);
+    return [id];
+  });
 }
 
 function normalizeStoredImageModel(value: string | null, availableModels: ImageModel[]): ImageModel {

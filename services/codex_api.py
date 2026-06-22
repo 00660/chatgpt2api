@@ -11,6 +11,7 @@ from utils.log import logger
 
 
 CODEX_RESPONSES_MODEL = "gpt-5.5"
+TOOL_CALL_CHANNEL_TYPE = "tool_call"
 CODEX_RESPONSES_INSTRUCTIONS = (
     "Use the image_generation tool to create exactly one image for the user's request. "
     "Return the generated image result."
@@ -18,10 +19,11 @@ CODEX_RESPONSES_INSTRUCTIONS = (
 
 
 class CodexAPI:
-    def __init__(self, base_url: str, access_token: str, model: str) -> None:
+    def __init__(self, base_url: str, access_token: str, model: str, channel_type: str = "") -> None:
         self.base_url = str(base_url or "https://chatgpt.com").rstrip("/")
         self.access_token = str(access_token or "").strip()
         self.model = str(model or CODEX_RESPONSES_MODEL).strip()
+        self.channel_type = str(channel_type or "").strip().lower()
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -30,6 +32,8 @@ class CodexAPI:
         }
 
     def _responses_path(self) -> str:
+        if self.channel_type == TOOL_CALL_CHANNEL_TYPE:
+            return "/responses" if urlparse(self.base_url).path.rstrip("/").endswith("/v1") else "/v1/responses"
         parsed = urlparse(self.base_url)
         host = parsed.netloc.lower()
         if host == "chatgpt.com" or host.endswith(".chatgpt.com"):

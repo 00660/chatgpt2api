@@ -153,17 +153,25 @@ export type ThirdPartyAppsSettings = {
 
 export type CodexChannel = {
   id: string;
+  type: "system" | "tool_call";
   enabled: boolean;
   name: string;
   base_url: string;
   api_key: string;
   upstream_model: "gpt-5.5" | "gpt-5.4" | "gpt-5.4-mini" | string;
+  weight: number | string;
+  mapped_models: string[];
   model_prefix: string;
   mapped_model?: string;
 };
 
 export type CodexChannelsSettings = {
   channels: CodexChannel[];
+};
+
+export type CodexChannelTestResult = {
+  ok: boolean;
+  image: string;
 };
 
 export type SettingsConfig = {
@@ -507,6 +515,13 @@ export async function updateSettingsConfig(settings: SettingsConfig) {
 
 export async function fetchThirdPartyApps() {
   return httpRequest<{ third_party_apps: ThirdPartyAppsSettings }>("/api/third-party-apps");
+}
+
+export async function testCodexChannel(channel: { type: string; base_url: string; api_key: string; upstream_model: string; prompt: string }) {
+  return httpRequest<{ result: CodexChannelTestResult }>("/api/codex-channels/test", {
+    method: "POST",
+    body: channel,
+  });
 }
 
 export async function testImageStorageConnection() {

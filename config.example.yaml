@@ -143,12 +143,18 @@ third_party_apps:
     enabled: true
     url: https://canvas.best
 
-# Codex 生图渠道。用于接入中转站 API，通过 /v1/responses 调用 Codex 工具生图。
+# 生图渠道。type: system 走本系统逆向；tool_call 走第三方中转站工具调用。
 codex_channels:
   channels:
+    - id: system
+      type: system
+      name: 系统渠道
+      weight: 1
     - enabled: false
-      name: 示例中转站
-      base_url: https://code.example.com/v1
+      type: tool_call
+      name: 示例工具调用中转站
+      base_url: https://api.example.com/v1
       api_key: ""
       upstream_model: gpt-5.5
-      model_prefix: example
+      weight: 1
+      mapped_model: gpt-image-2

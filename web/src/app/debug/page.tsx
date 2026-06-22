@@ -1,22 +1,17 @@
 "use client";
 
 import { LoaderCircle } from "lucide-react";
+import { Link } from "react-router-dom";
 
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Button } from "@/components/ui/button";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
-import { ChatPanel } from "./components/chat-panel";
-import { PptPanel } from "./components/ppt-panel";
-import { PsdPanel } from "./components/psd-panel";
-import { SearchPanel } from "./components/search-panel";
-import { SkillPanel } from "./components/skill-panel";
-
-const tabs = [
-  { value: "skills", title: "搜索Skills" },
-  { value: "search", title: "搜索" },
-  { value: "ppt", title: "PPT生成" },
-  { value: "psd", title: "PSD生成" },
-  { value: "chat", title: "对话" },
+const links = [
+  { href: "/chat", title: "对话" },
+  { href: "/search", title: "搜索" },
+  { href: "/ppt", title: "PPT生成" },
+  { href: "/psd", title: "PSD生成" },
+  { href: "/api-docs", title: "接口文档" },
 ];
 
 export default function DebugPage() {
@@ -24,36 +19,22 @@ export default function DebugPage() {
 
   if (isCheckingAuth || !session || session.role !== "admin") {
     return (
-      <div className="flex min-h-[calc(100vh-49px)] items-center justify-center">
-        <LoaderCircle className="size-5 animate-spin text-muted-foreground" />
+      <div className="flex min-h-[40vh] items-center justify-center">
+        <LoaderCircle className="size-5 animate-spin text-stone-400" />
       </div>
     );
   }
 
   return (
-    <Tabs defaultValue="skills" className="mx-auto flex min-h-[calc(100vh-49px)] w-full max-w-[1600px] flex-col gap-4 px-4 pt-3 pb-6 md:px-8">
-      <TabsList variant="line" className="w-full">
-        {tabs.map(({ value, title }) => (
-          <TabsTrigger key={value} value={value}>
-            {title}
-          </TabsTrigger>
+    <div className="mx-auto flex min-h-[60vh] max-w-xl flex-col items-center justify-center gap-4 text-center">
+      <h1 className="text-2xl font-semibold tracking-tight text-stone-950 dark:text-stone-50">调试入口已拆分</h1>
+      <div className="flex flex-wrap justify-center gap-2">
+        {links.map((item) => (
+          <Button key={item.href} variant="outline" asChild>
+            <Link to={item.href}>{item.title}</Link>
+          </Button>
         ))}
-      </TabsList>
-      <TabsContent value="skills">
-        <SkillPanel />
-      </TabsContent>
-      <TabsContent value="search" className="min-h-0">
-        <SearchPanel />
-      </TabsContent>
-      <TabsContent value="ppt" className="min-h-0">
-        <PptPanel />
-      </TabsContent>
-      <TabsContent value="psd" className="min-h-0">
-        <PsdPanel />
-      </TabsContent>
-      <TabsContent value="chat" className="min-h-0">
-        <ChatPanel />
-      </TabsContent>
-    </Tabs>
+      </div>
+    </div>
   );
 }

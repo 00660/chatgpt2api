@@ -12,11 +12,10 @@ import tiktoken
 
 from services.account_service import account_service
 from services.codex_api import CODEX_RESPONSES_MODEL, CodexAPI
-from services.config import config
+from services.config import CODEX_SYSTEM_TYPE, CODEX_TOOL_CALL_TYPE, config
 from services.image_storage_service import image_storage_service
 from services.openai_backend_api import ImageContentPolicyError, ImagePollTimeoutError, OpenAIBackendAPI
 from utils.helper import (
-    IMAGE_MODELS,
     extract_image_from_message_content,
     is_codex_image_model,
     is_supported_image_model,
@@ -1194,11 +1193,13 @@ def stream_codex_image_outputs(
         total: int = 1,
         base_url: str = "https://chatgpt.com",
         upstream_model: str = CODEX_RESPONSES_MODEL,
+        channel_type: str = "",
 ) -> Iterator[ImageOutput]:
     codex_api = CodexAPI(
         base_url=base_url,
         access_token=access_token,
         model=upstream_model,
+        channel_type=channel_type,
     )
     images = _codex_response_images(list(codex_api.iter_image_response_events(
         prompt=request.prompt,
@@ -1235,6 +1236,7 @@ def _generate_codex_channel_image(
             total,
             base_url=str(channel.get("base_url") or ""),
             upstream_model=str(channel.get("upstream_model") or CODEX_RESPONSES_MODEL),
+            channel_type=str(channel.get("type") or CODEX_TOOL_CALL_TYPE),
     ):
         outputs.append(output)
     return outputs
@@ -1267,8 +1269,17 @@ def _generate_single_image(
 
     while True:
         channel = config.get_codex_channel_for_model(request.model)
-        if channel:
+        channel_type = str((channel or {}).get("type") or "")
+        if channel and channel_type != CODEX_SYSTEM_TYPE:
             return _generate_codex_channel_image(request, channel, index, total)
+        if not channel:
+            channel_models = {
+                str(model or "").strip()
+                for item in config.list_enabled_codex_channels()
+                for model in item.get("mapped_models", [])
+                if str(model or "").strip()
+            }
+            raise ImageGenerationError("unsupported image model,supported models: " + ", ".join(sorted(channel_models)))
         try:
             if request.progress_callback:
                 request.progress_callback("getting_account")
@@ -1475,12 +1486,13 @@ def _generate_single_image(
 def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[ImageOutput]:
     """并行生成多张图片，每张图片使用独立线程和账号，互不阻塞。"""
     channel_models = {
-        str(channel.get("mapped_model") or "").strip()
+        str(model or "").strip()
         for channel in config.list_enabled_codex_channels()
-        if str(channel.get("mapped_model") or "").strip()
+        for model in channel.get("mapped_models", [])
+        if str(model or "").strip()
     }
-    if not is_supported_image_model(request.model) and not config.get_codex_channel_for_model(request.model):
-        raise ImageGenerationError("unsupported image model,supported models: " + ", ".join(sorted(IMAGE_MODELS | channel_models)))
+    if str(request.model or "").strip().lower() not in {model.lower() for model in channel_models}:
+        raise ImageGenerationError("unsupported image model,supported models: " + ", ".join(sorted(channel_models)))
 
     if request.n <= 1:
         # 单张图片，直接执行（无需线程池开销）

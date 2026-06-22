@@ -72,7 +72,15 @@ const DEFAULT_CODEX_CHANNELS: CodexChannelsSettings = {
   channels: [],
 };
 
-const CODEX_UPSTREAM_MODELS = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"] as const;
+const CODEX_SYSTEM_MODEL = "gpt-image-2";
+const CODEX_CHANNEL_TYPES = new Set(["system", "tool_call"]);
+
+function normalizeCodexChannelType(channel: Partial<CodexChannel> & { system?: boolean }) {
+  if (channel.system || channel.id === "system") return "system";
+  const type = String(channel.type || "").trim().toLowerCase();
+  if (CODEX_CHANNEL_TYPES.has(type)) return type as CodexChannel["type"];
+  return "tool_call";
+}
 
 function normalizeProxyRuntime(value: unknown): ProxyRuntimeSettings {
   const source = typeof value === "object" && value !== null ? value as Partial<ProxyRuntimeSettings> : {};
@@ -129,27 +137,48 @@ function normalizeThirdPartyApps(value: unknown): ThirdPartyAppsSettings {
   };
 }
 
+function normalizeMappedModel(channel: Partial<CodexChannel>) {
+  return String(channel.mapped_model || channel.mapped_models?.[0] || "").trim();
+}
+
 function normalizeCodexChannels(value: unknown): CodexChannelsSettings {
   const source = typeof value === "object" && value !== null ? value as Partial<CodexChannelsSettings> : {};
   const channels = Array.isArray(source.channels) ? source.channels : [];
+  const system = channels.find((item) => typeof item === "object" && item !== null && normalizeCodexChannelType(item as Partial<CodexChannel> & { system?: boolean }) === "system") as Partial<CodexChannel> | undefined;
   return {
-    channels: channels.map((item, index) => {
+    channels: [
+      {
+        id: "system",
+        type: "system",
+        enabled: true,
+        name: "系统渠道",
+        base_url: "",
+        api_key: "",
+        upstream_model: "gpt-5.5",
+        weight: Number(system?.weight ?? 1),
+        mapped_models: [CODEX_SYSTEM_MODEL],
+        model_prefix: "",
+        mapped_model: CODEX_SYSTEM_MODEL,
+      },
+      ...channels.filter((item) => !(typeof item === "object" && item !== null && normalizeCodexChannelType(item as Partial<CodexChannel> & { system?: boolean }) === "system")).map((item, index) => {
       const channel = typeof item === "object" && item !== null ? item as Partial<CodexChannel> : {};
       const prefix = String(channel.model_prefix || "").trim().toLowerCase();
-      const upstreamModel = CODEX_UPSTREAM_MODELS.includes(channel.upstream_model as typeof CODEX_UPSTREAM_MODELS[number])
-        ? String(channel.upstream_model)
-        : "gpt-5.5";
+      const upstreamModel = String(channel.upstream_model || "gpt-5.5").trim() || "gpt-5.5";
+      const mappedModel = normalizeMappedModel(channel) || (prefix ? `${prefix}-gpt-image-2` : "gpt-image-2");
       return {
         id: String(channel.id || `channel-${index + 1}`),
+        type: normalizeCodexChannelType(channel),
         enabled: Boolean(channel.enabled),
         name: String(channel.name || ""),
         base_url: String(channel.base_url || ""),
         api_key: String(channel.api_key || ""),
         upstream_model: upstreamModel,
+        weight: Number(channel.weight ?? 1),
+        mapped_models: [mappedModel],
         model_prefix: prefix,
-        mapped_model: prefix ? `${prefix}-gpt-image-2` : "",
+        mapped_model: mappedModel,
       };
-    }),
+    })],
   };
 }
 
@@ -449,6 +478,9 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
             name: String(channel.name || "").trim(),
             base_url: String(channel.base_url || "").trim(),
             api_key: String(channel.api_key || "").trim(),
+            weight: Math.max(0, Number(channel.weight) || 0),
+            mapped_model: channel.type === "system" ? CODEX_SYSTEM_MODEL : normalizeMappedModel(channel),
+            mapped_models: [channel.type === "system" ? CODEX_SYSTEM_MODEL : normalizeMappedModel(channel)].filter(Boolean),
             model_prefix: String(channel.model_prefix || "").trim().toLowerCase(),
           })),
         },
@@ -686,13 +718,16 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
               ...settings.channels,
               {
                 id,
+                type: "tool_call",
                 enabled: true,
                 name: "",
                 base_url: "",
                 api_key: "",
                 upstream_model: "gpt-5.5",
+                weight: 1,
+                mapped_models: ["gpt-image-2"],
                 model_prefix: "",
-                mapped_model: "",
+                mapped_model: "gpt-image-2",
               },
             ],
           },
@@ -717,10 +752,12 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
               }
               const next = { ...channel, ...updates };
               const prefix = String(next.model_prefix || "").trim().toLowerCase();
+              const mappedModel = next.type === "system" ? CODEX_SYSTEM_MODEL : normalizeMappedModel(next);
               return {
                 ...next,
                 model_prefix: prefix,
-                mapped_model: prefix ? `${prefix}-gpt-image-2` : "",
+                mapped_models: [mappedModel].filter(Boolean),
+                mapped_model: mappedModel,
               };
             }),
           },
@@ -739,7 +776,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         config: {
           ...state.config,
           codex_channels: {
-            channels: settings.channels.filter((channel) => channel.id !== id),
+            channels: settings.channels.filter((channel) => channel.type === "system" || channel.id !== id),
           },
         },
       };
