@@ -16,8 +16,8 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env", override=False)
 
 DATA_DIR = BASE_DIR / "data"
-CONFIG_FILE = Path(os.getenv("CHATGPT2API_CONFIG_FILE") or BASE_DIR / "config.yaml")
-EXAMPLE_CONFIG_FILE = Path(os.getenv("CHATGPT2API_EXAMPLE_CONFIG_FILE") or BASE_DIR / "config.example.yaml")
+CONFIG_FILE = BASE_DIR / "config.yaml"
+EXAMPLE_CONFIG_FILE = BASE_DIR / "config.example.yaml"
 VERSION_FILE = BASE_DIR / "VERSION"
 
 DEFAULT_IMAGE_STORAGE = {
@@ -534,11 +534,7 @@ class ConfigStore:
 
     @property
     def base_url(self) -> str:
-        return str(
-            os.getenv("CHATGPT2API_BASE_URL")
-            or self.data.get("base_url")
-            or ""
-        ).strip().rstrip("/")
+        return str(self.data.get("base_url") or "").strip().rstrip("/")
 
     @property
     def app_version(self) -> str:

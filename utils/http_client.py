@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from curl_cffi import requests as curl_requests
 
 
-DEFAULT_BACKEND = "curl_cffi"
 DEFAULT_TIMEOUT = 30.0
 
 FINGERPRINT_HEADERS: dict[str, dict[str, str]] = {
@@ -61,19 +59,13 @@ class HttpClient:
         headers: dict[str, str] | None = None,
         timeout: float = DEFAULT_TIMEOUT,
         follow_redirects: bool = True,
-        backend: str = "",
-        http2: bool = True,
     ) -> None:
-        self.backend = _normalize_backend(backend)
         self.fingerprint = str(fingerprint or "").strip()
         self.follow_redirects = follow_redirects
         self.timeout = float(timeout or DEFAULT_TIMEOUT)
         self.proxy = str(proxy or "").strip()
         self.verify = verify
-        if self.backend == "httpx":
-            self.client = self._build_httpx_client(headers or {}, http2)
-        else:
-            self.client = self._build_curl_client(headers or {})
+        self.client = self._build_curl_client(headers or {})
         self.headers = self.client.headers
         self.cookies = self.client.cookies
 
@@ -87,22 +79,16 @@ class HttpClient:
         **kwargs: Any,
     ) -> HttpResponse:
         follow = self.follow_redirects if follow_redirects is None else follow_redirects
-        if self.backend == "httpx":
-            raw = self.client.request(
-                method,
-                url,
-                follow_redirects=follow,
-                timeout=float(timeout or self.timeout),
-                **kwargs,
-            )
-        else:
-            raw = self.client.request(
-                method,
-                url,
-                allow_redirects=follow,
-                timeout=float(timeout or self.timeout),
-                **kwargs,
-            )
+        request_kwargs = self._request_kwargs(kwargs)
+        request_timeout = timeout or request_kwargs.pop("client_timeout", None) or self.timeout
+        raw = self.client.request(
+            method,
+            url,
+            allow_redirects=follow,
+            timeout=float(request_timeout),
+            **request_kwargs,
+            **kwargs,
+        )
         return HttpResponse(raw)
 
     def get(self, url: str, **kwargs: Any) -> HttpResponse:
@@ -131,64 +117,30 @@ class HttpClient:
         session.headers.update(headers)
         return session
 
-    def _build_httpx_client(self, headers: dict[str, str], http2: bool):
-        import httpx
+    def _request_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        request_kwargs: dict[str, Any] = {}
+        proxy = str(kwargs.pop("proxy", "") or "")
+        fingerprint = str(kwargs.pop("fingerprint", "") or "")
+        verify = kwargs.pop("verify", None)
+        headers = kwargs.pop("base_headers", None)
+        request_headers = kwargs.pop("headers", None)
+        client_timeout = kwargs.pop("client_timeout", None)
 
-        merged_headers = browser_headers(self.fingerprint)
-        merged_headers.update(headers)
-        try:
-            return httpx.Client(
-                headers=merged_headers,
-                verify=self.verify,
-                proxy=self.proxy or None,
-                timeout=httpx.Timeout(self.timeout),
-                follow_redirects=False,
-                http2=http2,
-                trust_env=False,
-            )
-        except ImportError:
-            return httpx.Client(
-                headers=merged_headers,
-                verify=self.verify,
-                proxy=self.proxy or None,
-                timeout=httpx.Timeout(self.timeout),
-                follow_redirects=False,
-                http2=False,
-                trust_env=False,
-            )
+        if proxy:
+            request_kwargs["proxy"] = proxy
+        if verify is not None:
+            request_kwargs["verify"] = bool(verify)
+        if fingerprint:
+            request_kwargs["impersonate"] = fingerprint
+        if client_timeout:
+            request_kwargs["client_timeout"] = float(client_timeout)
 
-
-def request(method: str, url: str, **kwargs: Any) -> HttpResponse:
-    client = HttpClient(
-        proxy=str(kwargs.pop("proxy", "") or ""),
-        verify=bool(kwargs.pop("verify", True)),
-        fingerprint=str(kwargs.pop("fingerprint", "") or ""),
-        headers=kwargs.pop("base_headers", None),
-        timeout=float(kwargs.pop("client_timeout", DEFAULT_TIMEOUT) or DEFAULT_TIMEOUT),
-        follow_redirects=bool(kwargs.pop("follow_redirects", True)),
-        backend=str(kwargs.pop("backend", "") or ""),
-    )
-    try:
-        return client.request(method, url, **kwargs)
-    finally:
-        client.close()
-
-
-def get(url: str, **kwargs: Any) -> HttpResponse:
-    return request("GET", url, **kwargs)
-
-
-def post(url: str, **kwargs: Any) -> HttpResponse:
-    return request("POST", url, **kwargs)
-
-
-def put(url: str, **kwargs: Any) -> HttpResponse:
-    return request("PUT", url, **kwargs)
-
-
-def delete(url: str, **kwargs: Any) -> HttpResponse:
-    return request("DELETE", url, **kwargs)
-
+        merged_headers = browser_headers(fingerprint)
+        merged_headers.update(headers or {})
+        merged_headers.update(request_headers or {})
+        if merged_headers:
+            request_kwargs["headers"] = merged_headers
+        return request_kwargs
 
 def browser_headers(fingerprint: str = "") -> dict[str, str]:
     value = str(fingerprint or "").strip().lower()
@@ -199,6 +151,4 @@ def browser_headers(fingerprint: str = "") -> dict[str, str]:
     return {}
 
 
-def _normalize_backend(value: str = "") -> str:
-    backend = str(value or os.getenv("CHATGPT2API_HTTP_BACKEND") or DEFAULT_BACKEND).strip().lower()
-    return "httpx" if backend == "httpx" else "curl_cffi"
+http_client = HttpClient()

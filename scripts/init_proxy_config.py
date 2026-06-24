@@ -12,6 +12,10 @@ from typing import Any
 
 import yaml
 
+BASE_DIR = Path(__file__).resolve().parents[1]
+CONFIG_FILE = BASE_DIR / "config.yaml"
+EXAMPLE_CONFIG_FILE = BASE_DIR / "config.example.yaml"
+
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -126,12 +130,11 @@ def _mask_url(value: str) -> str:
 
 
 def main() -> int:
-    config_path = Path(os.getenv("CHATGPT2API_CONFIG_FILE", "/app/config.yaml"))
+    config_path = CONFIG_FILE
     if not config_path.exists():
-        example_path = Path(os.getenv("CHATGPT2API_EXAMPLE_CONFIG_FILE", "/app/config.example.yaml"))
-        if example_path.exists():
+        if EXAMPLE_CONFIG_FILE.exists():
             config_path.parent.mkdir(parents=True, exist_ok=True)
-            config_path.write_text(example_path.read_text(encoding="utf-8"), encoding="utf-8")
+            config_path.write_text(EXAMPLE_CONFIG_FILE.read_text(encoding="utf-8"), encoding="utf-8")
         else:
             print(f"Config file not found, creating {config_path}")
 

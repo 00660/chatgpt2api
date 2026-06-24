@@ -26,7 +26,7 @@ class InitProxyConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.yaml"
             path.write_text(yaml.safe_dump({"proxy": ""}), encoding="utf-8")
-            with patch.dict(os.environ, {"CHATGPT2API_CONFIG_FILE": str(path)}, clear=False):
+            with patch.object(module, "CONFIG_FILE", path):
                 self.assertEqual(module.main(), 0)
 
             data = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -59,7 +59,7 @@ class InitProxyConfigTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            with patch.dict(os.environ, {"CHATGPT2API_CONFIG_FILE": str(path)}, clear=False):
+            with patch.object(module, "CONFIG_FILE", path):
                 self.assertEqual(module.main(), 0)
 
             runtime = yaml.safe_load(path.read_text(encoding="utf-8"))["proxy_runtime"]
@@ -78,13 +78,13 @@ class InitProxyConfigTests(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
-                    "CHATGPT2API_CONFIG_FILE": str(path),
                     "CHATGPT2API_PROXY_RUNTIME_ENABLED": "false",
                     "CHATGPT2API_PROXY_RUNTIME_CLEARANCE_ENABLED": "false",
                 },
                 clear=False,
             ):
-                self.assertEqual(module.main(), 0)
+                with patch.object(module, "CONFIG_FILE", path):
+                    self.assertEqual(module.main(), 0)
 
             runtime = yaml.safe_load(path.read_text(encoding="utf-8"))["proxy_runtime"]
             self.assertFalse(runtime["enabled"])
@@ -103,7 +103,7 @@ class InitProxyConfigTests(unittest.TestCase):
                     raise OSError(errno.EBUSY, "Device or resource busy")
                 return original_replace(self, target)
 
-            with patch.dict(os.environ, {"CHATGPT2API_CONFIG_FILE": str(path)}, clear=False):
+            with patch.object(module, "CONFIG_FILE", path):
                 with patch.object(Path, "replace", replace_with_ebusy):
                     self.assertEqual(module.main(), 0)
 

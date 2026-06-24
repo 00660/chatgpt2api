@@ -11,7 +11,7 @@ from typing import Any, Iterable, Iterator
 import tiktoken
 
 from services.account_service import account_service
-from services.codex_api import CODEX_RESPONSES_MODEL, CodexAPI
+from services.codex_api import  CodexAPI
 from services.config import CODEX_SYSTEM_TYPE, CODEX_TOOL_CALL_TYPE, config
 from services.image_storage_service import image_storage_service
 from services.openai_backend_api import ImageContentPolicyError, ImagePollTimeoutError, OpenAIBackendAPI
@@ -24,6 +24,7 @@ from utils.helper import (
 from utils.image_tokens import count_image_content_tokens
 from utils.log import logger
 
+CODEX_RESPONSES_MODEL = "gpt-5.5"
 
 class ImageGenerationError(Exception):
     def __init__(
@@ -1168,24 +1169,6 @@ def stream_image_outputs(
                           conversation_id=conversation_id)
 
 
-def _codex_response_images(value: Any) -> list[str]:
-    if isinstance(value, dict):
-        if value.get("type") == "image_generation_call" and isinstance(value.get("result"), str):
-            result = value["result"].strip()
-            if result:
-                return [result.split(",", 1)[1] if result.startswith("data:image/") else result]
-        images: list[str] = []
-        for item in value.values():
-            images.extend(_codex_response_images(item))
-        return images
-    if isinstance(value, list):
-        images: list[str] = []
-        for item in value:
-            images.extend(_codex_response_images(item))
-        return images
-    return []
-
-
 def stream_codex_image_outputs(
         access_token: str,
         request: ConversationRequest,
@@ -1193,24 +1176,23 @@ def stream_codex_image_outputs(
         total: int = 1,
         base_url: str = "https://chatgpt.com",
         upstream_model: str = CODEX_RESPONSES_MODEL,
-        channel_type: str = "",
+        version: str = "v2",
 ) -> Iterator[ImageOutput]:
-    codex_api = CodexAPI(
+    image = CodexAPI(
         base_url=base_url,
         access_token=access_token,
         model=upstream_model,
-        channel_type=channel_type,
+        version=version,
+    ).generate_image(
+        {
+            "prompt": request.prompt,
+            "images": request.images or [],
+            "size": request.size,
+            "quality": request.quality,
+        }
     )
-    images = _codex_response_images(list(codex_api.iter_image_response_events(
-        prompt=request.prompt,
-        images=request.images or [],
-        size=request.size,
-        quality=request.quality,
-    )))
-    if not images:
-        raise ImageGenerationError("No image result found in response")
     data = format_image_result(
-        [{"b64_json": item, "revised_prompt": request.prompt} for item in images],
+        [{"b64_json": image, "revised_prompt": request.prompt}],
         request.prompt,
         request.response_format,
         request.base_url,
@@ -1220,7 +1202,6 @@ def stream_codex_image_outputs(
         yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data)
         return
     raise ImageGenerationError("No image result found in response")
-
 
 def _generate_codex_channel_image(
         request: ConversationRequest,
@@ -1236,7 +1217,6 @@ def _generate_codex_channel_image(
             total,
             base_url=str(channel.get("base_url") or ""),
             upstream_model=str(channel.get("upstream_model") or CODEX_RESPONSES_MODEL),
-            channel_type=str(channel.get("type") or CODEX_TOOL_CALL_TYPE),
     ):
         outputs.append(output)
     return outputs
@@ -1605,3 +1585,4 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
     if account_email:
         result["_account_email"] = account_email
     return result
+

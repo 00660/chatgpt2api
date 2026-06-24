@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from utils.http_client import post
+from utils.http_client import http_client
 from fastapi import HTTPException
 
 from services.config import config
@@ -186,7 +186,7 @@ def check_request(text: str) -> None:
             )
 
     try:
-        response = post(
+        response = http_client.post(
             f"{base_url}/v1/chat/completions",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={"model": model, "messages": [{"role": "user", "content": content}], "temperature": 0},

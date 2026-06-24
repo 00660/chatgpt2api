@@ -10,7 +10,7 @@ from typing import Any, Iterator
 from urllib.parse import urlparse
 
 import httpx
-from utils.http_client import get
+from utils.http_client import http_client
 from fastapi import HTTPException
 from services.proxy_service import proxy_settings
 from utils.log import logger
@@ -346,7 +346,7 @@ def _decode_message_image_url(value: object) -> tuple[bytes, str] | None:
         return None
 
     try:
-        response = get(
+        response = http_client.get(
             source,
             headers={"Accept": "image/*,*/*;q=0.8", "User-Agent": "chatgpt2api vision fetcher"},
             timeout=REMOTE_IMAGE_TIMEOUT_SECONDS,

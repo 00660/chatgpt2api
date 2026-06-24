@@ -63,6 +63,7 @@ class CodexChannelTestRequest(BaseModel):
     base_url: str = ""
     api_key: str = ""
     upstream_model: str = "gpt-5.5"
+    version: str = "v2"
     prompt: str = "生成一只鸡"
 
 
@@ -85,29 +86,19 @@ def create_router(app_version: str) -> APIRouter:
     router = APIRouter()
 
     def codex_channel_test(body: CodexChannelTestRequest) -> dict[str, object]:
-        events = list(CodexAPI(body.base_url, body.api_key, body.upstream_model, body.type).iter_image_response_events(
-            body.prompt,
-            size="1024x1024",
-            quality="auto",
-        ))
-        images: list[str] = []
-
-        def collect(value: object) -> None:
-            if isinstance(value, dict):
-                if value.get("type") == "image_generation_call" and isinstance(value.get("result"), str):
-                    result = value["result"].strip()
-                    if result:
-                        images.append(result.split(",", 1)[1] if result.startswith("data:image/") else result)
-                for item in value.values():
-                    collect(item)
-            elif isinstance(value, list):
-                for item in value:
-                    collect(item)
-
-        collect(events)
-        if not images:
-            raise RuntimeError("No image result found in response")
-        return {"ok": True, "image": images[0]}
+        image = CodexAPI(
+            body.base_url,
+            body.api_key,
+            body.upstream_model,
+            version=body.version,
+        ).generate_image(
+            {
+                "prompt": body.prompt,
+                "size": "1024x1024",
+                "quality": "auto",
+            }
+        )
+        return {"ok": True, "image": image}
 
     @router.post("/auth/login")
     async def login(authorization: str | None = Header(default=None)):

@@ -43,6 +43,7 @@ def detect_ext(image_bytes: bytes) -> str:
 def save_image(image_b64: str, name: str) -> Path:
     image_bytes = base64.b64decode(image_b64)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    path = OUTPUT_DIR / f"{name}_{int(time.time())}{detect_ext(image_bytes)}"
+    prefix = f"{time.strftime('%Y%m%d-%H%M%S')}-{time.time_ns() % 1_000_000_000:09d}"
+    path = OUTPUT_DIR / f"{prefix}_{name}{detect_ext(image_bytes)}"
     path.write_bytes(image_bytes)
     return path

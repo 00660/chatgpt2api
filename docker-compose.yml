@@ -7,9 +7,6 @@ services:
       - "3000:80"
     volumes:
       - ./data:/app/data
-      - .:/config
+      - ./config.yaml:/app/config.yaml
     environment:
       CHATGPT2API_AUTH_KEY: ${CHATGPT2API_AUTH_KEY}
-      CHATGPT2API_BASE_URL: ${CHATGPT2API_BASE_URL:-}
-      CHATGPT2API_CONFIG_FILE: /config/config.yaml
-      CHATGPT2API_EXAMPLE_CONFIG_FILE: /config/config.example.yaml
