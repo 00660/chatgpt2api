@@ -1,30 +1,13 @@
-"use client";
-
-import { useEffect } from "react";
-import { useRouter } from "next/navigation";
-
-import { getValidatedAuthSession } from "@/lib/auth-session";
-import { getDefaultRouteForRole } from "@/store/auth";
-
 export default function HomePage() {
-  const router = useRouter();
-
-  useEffect(() => {
-    let active = true;
-
-    const redirect = async () => {
-      const session = await getValidatedAuthSession();
-      if (!active) {
-        return;
-      }
-      router.replace(session ? getDefaultRouteForRole(session.role) : "/login");
-    };
-
-    void redirect();
-    return () => {
-      active = false;
-    };
-  }, [router]);
-
-  return null;
+  return (
+    <div className="grid min-h-[calc(100vh-1rem)] w-full place-items-center px-4 py-6">
+      <meta httpEquiv="refresh" content="0;url=/login/" />
+      <a
+        href="/login/"
+        className="rounded-2xl bg-stone-950 px-5 py-3 text-sm font-medium text-white shadow-sm"
+      >
+        进入登录页
+      </a>
+    </div>
+  );
 }

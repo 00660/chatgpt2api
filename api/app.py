@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import json
 from threading import Event
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from api import accounts, ai, image_tasks, register, system
 from api.errors import install_exception_handlers
@@ -13,6 +14,41 @@ from api.support import resolve_web_asset, start_limited_account_watcher
 from services.backup_service import backup_service
 from services.config import config
 from services.image_service import start_image_cleanup_scheduler
+
+
+def create_stale_chunk_response(app_version: str) -> Response:
+    version_json = json.dumps(app_version)
+    script = f"""
+(() => {{
+  const version = {version_json};
+  const param = "_chatgpt2api_reload";
+  try {{
+    const url = new URL(window.location.href);
+    if (url.searchParams.get(param) === version) {{
+      return;
+    }}
+    url.searchParams.set(param, version);
+    try {{
+      if (window.sessionStorage) {{
+        window.sessionStorage.setItem("chatgpt2api_stale_chunk_reload", version);
+      }}
+    }} catch {{}}
+    try {{
+      if (window.caches) {{
+        window.caches.keys().then((keys) => Promise.all(keys.map((key) => window.caches.delete(key)))).catch(() => undefined);
+      }}
+    }} catch {{}}
+    window.location.replace(url.toString());
+  }} catch {{
+    window.location.reload();
+  }}
+}})();
+""".lstrip()
+    return Response(
+        content=script,
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def create_app() -> FastAPI:
@@ -55,7 +91,10 @@ def create_app() -> FastAPI:
             if asset.suffix == ".html":
                 return FileResponse(asset, headers={"Cache-Control": "no-store"})
             return FileResponse(asset)
-        if full_path.strip("/").startswith("_next/"):
+        normalized_path = full_path.strip("/")
+        if normalized_path.startswith("_next/static/") and normalized_path.endswith(".js"):
+            return create_stale_chunk_response(app_version)
+        if normalized_path.startswith("_next/"):
             raise HTTPException(status_code=404, detail="Not Found")
         fallback = resolve_web_asset("")
         if fallback is None:
