@@ -19,6 +19,7 @@ from curl_cffi import requests
 from services.account_service import account_service
 from services.proxy_service import ClearanceBundle, proxy_settings
 from services.register import mail_provider
+from services.register_mihomo_service import normalize_register_runtime_config, resolve_register_worker_proxy
 
 base_dir = Path(__file__).resolve().parent
 config = {
@@ -28,19 +29,30 @@ config = {
         "wait_interval": 2,
         "providers": [],
     },
+    "scheduler": {
+        "fetch_otp_url": "http://192.168.2.204:8790/router/fetch-email-otp",
+        "request_timeout": 8,
+        "wait_timeout": 120,
+        "wait_interval": 2,
+    },
     "proxy": "",
+    "proxy_mode": "direct",
+    "mihomo": {},
     "total": 10,
     "threads": 3,
 }
 register_config_file = base_dir.parents[1] / "data" / "register.json"
 try:
     saved_config = json.loads(register_config_file.read_text(encoding="utf-8"))
-    config.update({key: saved_config[key] for key in ("mail", "proxy", "total", "threads") if key in saved_config})
+    config.update({key: saved_config[key] for key in ("mail", "scheduler", "proxy", "proxy_mode", "mihomo", "mimo", "total", "threads") if key in saved_config})
 except Exception:
     pass
+config = normalize_register_runtime_config(config)
 
 auth_base = "https://auth.openai.com"
 platform_base = "https://platform.openai.com"
+login_oauth_client_id = "app_EMoamEEZ73f0CkXaXp7hrann"
+login_oauth_redirect_uri = "http://localhost:1455/auth/callback"
 platform_oauth_client_id = "app_2SKx67EdpoN0G6j64rFvigXD"
 platform_oauth_redirect_uri = f"{platform_base}/auth/callback"
 platform_oauth_audience = "https://api.openai.com/v1"
@@ -172,6 +184,18 @@ def _response_json(resp) -> dict:
         return {}
 
 
+def _decode_jwt_payload(token: str) -> dict:
+    try:
+        payload = str(token or "").split(".")[1]
+        padding = 4 - len(payload) % 4
+        if padding != 4:
+            payload += "=" * padding
+        data = json.loads(base64.urlsafe_b64decode(payload))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 def _response_debug_detail(resp, limit: int = 800) -> str:
     if resp is None:
         return ""
@@ -239,7 +263,78 @@ def create_mailbox(username: str | None = None) -> dict:
     return mail_provider.create_mailbox(_mail_config(), username)
 
 
-def wait_for_code(mailbox: dict) -> str | None:
+def _scheduler_config() -> dict:
+    source = config.get("scheduler") if isinstance(config.get("scheduler"), dict) else {}
+    return {
+        "fetch_otp_url": str(source.get("fetch_otp_url") or "").strip(),
+        "request_timeout": max(1, int(source.get("request_timeout") or config["mail"].get("request_timeout") or 8)),
+        "wait_timeout": max(1, int(source.get("wait_timeout") or config["mail"].get("wait_timeout") or 120)),
+        "wait_interval": max(1.0, float(source.get("wait_interval") or config["mail"].get("wait_interval") or 2)),
+    }
+
+
+def build_existing_mailbox(address: str, not_before: float | None = None) -> dict[str, Any]:
+    email = str(address or "").strip().lower()
+    if not email:
+        raise RuntimeError("缺少邮箱地址")
+    return {
+        "provider": "scheduler",
+        "address": email,
+        "not_before": float(not_before) if not_before is not None else time.time(),
+    }
+
+
+def wait_for_scheduler_code(email: str, not_before: float | None = None, label: str = "路由器注册取码") -> str | None:
+    target_email = str(email or "").strip().lower()
+    if not target_email:
+        raise RuntimeError("调度台取码缺少邮箱地址")
+    scheduler = _scheduler_config()
+    fetch_url = scheduler["fetch_otp_url"]
+    if not fetch_url:
+        raise RuntimeError("调度台取码地址为空")
+    seen_codes: set[str] = set()
+    started_at = float(not_before) if not_before is not None else time.time()
+    deadline = time.monotonic() + float(scheduler["wait_timeout"])
+    fetch_timeout_seconds = max(1.0, min(float(scheduler["wait_interval"]) + 0.5, 4.0))
+    last_error = ""
+    while time.monotonic() < deadline:
+        try:
+            resp = requests.post(
+                fetch_url,
+                json={
+                    "email": target_email,
+                    "not_before": started_at,
+                    "exclude_codes": sorted(seen_codes),
+                    "timeout_seconds": fetch_timeout_seconds,
+                    "label": label,
+                },
+                timeout=scheduler["request_timeout"],
+                verify=False,
+            )
+            data = _response_json(resp)
+            if resp.status_code >= 400:
+                last_error = f"调度台取码 HTTP {resp.status_code}: {str(getattr(resp, 'text', '') or '')[:300]}"
+            elif data.get("ok"):
+                code = str(data.get("code") or "").strip()
+                if code:
+                    seen_codes.add(code)
+                    return code
+                last_error = str(data.get("error") or data.get("reason") or "调度台未返回验证码").strip()
+            else:
+                last_error = str(data.get("error") or data.get("reason") or "调度台暂无验证码").strip()
+        except Exception as exc:
+            last_error = str(exc).strip()
+        time.sleep(float(scheduler["wait_interval"]))
+    if last_error:
+        log(f"{target_email} 调度台取码超时: {last_error}", "yellow")
+    return None
+
+
+def wait_for_code(mailbox: dict, label: str = "路由器注册取码") -> str | None:
+    scheduler = _scheduler_config()
+    target_email = str((mailbox or {}).get("address") or "").strip().lower()
+    if scheduler["fetch_otp_url"] and target_email:
+        return wait_for_scheduler_code(target_email, (mailbox or {}).get("not_before"), label)
     return mail_provider.wait_for_code(_mail_config(), mailbox)
 
 
@@ -377,6 +472,120 @@ def request_platform_oauth_token(session: requests.Session, code: str, code_veri
     return _response_json(resp)
 
 
+def exchange_platform_tokens_from_callback_url(session: requests.Session, code_verifier: str, callback_url: str) -> dict | None:
+    callback_params = extract_oauth_callback_params_from_url(callback_url)
+    if not callback_params:
+        return None
+    code = str(callback_params.get("code") or "").strip()
+    if not code:
+        return None
+    tokens = request_platform_oauth_token(session, code, code_verifier)
+    if not tokens:
+        return None
+    payload = _decode_jwt_payload(str(tokens.get("id_token") or "")) or _decode_jwt_payload(str(tokens.get("access_token") or ""))
+    return {
+        "email": str(payload.get("email") or "").strip(),
+        "access_token": str(tokens.get("access_token") or "").strip(),
+        "refresh_token": str(tokens.get("refresh_token") or "").strip(),
+        "id_token": str(tokens.get("id_token") or "").strip(),
+    }
+
+
+def extract_oauth_callback_params_from_consent_session(session: requests.Session, consent_url: str, device_id: str) -> dict[str, str] | None:
+    if consent_url.startswith("/"):
+        consent_url = f"{auth_base}{consent_url}"
+    current_url = consent_url
+    for _ in range(10):
+        response = session.get(current_url, headers=navigate_headers, verify=False, timeout=30, allow_redirects=False)
+        callback_params = extract_oauth_callback_params_from_url(str(response.url)) or extract_oauth_callback_params_from_url(str(response.headers.get("Location") or "").strip())
+        if callback_params:
+            return callback_params
+        location = str(response.headers.get("Location") or "").strip()
+        if response.status_code not in (301, 302, 303, 307, 308) or not location:
+            break
+        current_url = f"{auth_base}{location}" if location.startswith("/") else location
+
+    raw = session.cookies.get("oai-client-auth-session", domain=".auth.openai.com") or session.cookies.get("oai-client-auth-session")
+    if not raw:
+        return None
+    try:
+        first_part = raw.split(".")[0]
+        padding = 4 - len(first_part) % 4
+        if padding != 4:
+            first_part += "=" * padding
+        payload = json.loads(base64.urlsafe_b64decode(first_part))
+        workspace_id = payload["workspaces"][0]["id"]
+    except Exception:
+        return None
+    headers = dict(common_headers)
+    headers["referer"] = consent_url
+    headers["oai-device-id"] = device_id
+    headers.update(_make_trace_headers())
+    ws_resp = session.post(
+        f"{auth_base}/api/accounts/workspace/select",
+        json={"workspace_id": workspace_id},
+        headers=headers,
+        verify=False,
+        timeout=30,
+        allow_redirects=False,
+    )
+    callback_params = extract_oauth_callback_params_from_url(str(ws_resp.headers.get("Location") or "").strip())
+    if callback_params:
+        return callback_params
+    ws_data = _response_json(ws_resp)
+    orgs = ((ws_data.get("data") or {}).get("orgs") or []) if isinstance(ws_data, dict) else []
+    if not orgs:
+        return None
+    org_id = str((orgs[0] or {}).get("id") or "").strip()
+    project_id = str(((orgs[0] or {}).get("projects") or [{}])[0].get("id") or "").strip()
+    if not org_id:
+        return None
+    org_headers = dict(common_headers)
+    org_headers["referer"] = str(ws_data.get("continue_url") or consent_url)
+    org_headers["oai-device-id"] = device_id
+    org_headers.update(_make_trace_headers())
+    body = {"org_id": org_id}
+    if project_id:
+        body["project_id"] = project_id
+    org_resp = session.post(
+        f"{auth_base}/api/accounts/organization/select",
+        json=body,
+        headers=org_headers,
+        verify=False,
+        timeout=30,
+        allow_redirects=False,
+    )
+    return extract_oauth_callback_params_from_url(str(org_resp.headers.get("Location") or "").strip())
+
+
+def exchange_platform_tokens(session: requests.Session, device_id: str, code_verifier: str, consent_url: str) -> dict | None:
+    callback_params = extract_oauth_callback_params_from_consent_session(session, consent_url, device_id)
+    if not callback_params:
+        return None
+    query = urlencode({key: value for key, value in callback_params.items() if value})
+    callback_url = f"{platform_oauth_redirect_uri}?{query}" if query else ""
+    return exchange_platform_tokens_from_callback_url(session, code_verifier, callback_url)
+
+
+def _normalize_auth_url(url: str) -> str:
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    if text.startswith("/"):
+        return f"{auth_base}{text}"
+    return text
+
+
+def _response_landed_on_error_page(resp: Any) -> bool:
+    if resp is None:
+        return False
+    current_url = str(getattr(resp, "url", "") or "").strip().lower()
+    if "/error" not in current_url:
+        return False
+    body = str(getattr(resp, "text", "") or "")[:2000].lower()
+    return "invalid_auth_step" in body or "invalid authorization step" in body or True
+
+
 class PlatformRegistrar:
     def __init__(self, proxy: str = "") -> None:
         self.proxy = str(proxy or "").strip()
@@ -390,10 +599,33 @@ class PlatformRegistrar:
     def close(self) -> None:
         self.session.close()
 
+    def _reset_session(self) -> None:
+        try:
+            self.session.close()
+        except Exception:
+            pass
+        self.session = create_session(self.proxy)
+        self.clearance_user_agent = ""
+        self.clearance_failure_reason = ""
+        self.device_id = str(uuid.uuid4())
+        self.code_verifier = ""
+        self.platform_auth_code = ""
+
     def _navigate_headers(self, referer: str = "") -> dict[str, str]:
         headers = dict(navigate_headers)
         if referer:
             headers["referer"] = referer
+        return headers
+
+    def _flow_headers(self, referer: str, session: Any | None = None, device_id: str = "", flow: str = "") -> dict[str, str]:
+        target_session = session or self.session
+        target_device_id = str(device_id or self.device_id).strip() or self.device_id
+        headers = dict(common_headers)
+        headers["referer"] = referer
+        headers["oai-device-id"] = target_device_id
+        headers.update(_make_trace_headers())
+        if flow:
+            headers["openai-sentinel-token"] = build_sentinel_token(target_session, target_device_id, flow)
         return headers
 
     def _json_headers(self, referer: str) -> dict[str, str]:
@@ -519,6 +751,215 @@ class PlatformRegistrar:
             raise RuntimeError(error or f"send_otp_http_{getattr(resp, 'status_code', 'unknown')}")
         step(index, "发送验证码完成")
 
+    def _start_login_with_email_otp(self, email: str, index: int, session: Any, device_id: str) -> str:
+        step(index, "开始进入邮箱验证码登录")
+        url = f"{auth_base}/api/accounts/authorize/continue"
+        headers = self._flow_headers(f"{auth_base}/log-in", session=session, device_id=device_id, flow="authorize_continue")
+        headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
+        resp, error = request_with_local_retry(
+            session,
+            "post",
+            url,
+            json={"username": {"kind": "email", "value": email}, "screen_hint": "login"},
+            headers=headers,
+            allow_redirects=False,
+            verify=False,
+        )
+        if _is_cloudflare_challenge(resp):
+            bundle = self._refresh_cloudflare_clearance(auth_base, index)
+            if bundle is None:
+                raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
+            headers = self._flow_headers(f"{auth_base}/log-in", session=session, device_id=device_id, flow="authorize_continue")
+            headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
+            resp, error = request_with_local_retry(
+                session,
+                "post",
+                url,
+                json={"username": {"kind": "email", "value": email}, "screen_hint": "login"},
+                headers=headers,
+                allow_redirects=False,
+                verify=False,
+            )
+        if resp is None or resp.status_code != 200:
+            detail = _response_json(resp) if resp is not None else {}
+            suffix = f", detail={json.dumps(detail, ensure_ascii=False)}" if detail else ""
+            raise RuntimeError(error or f"authorize_continue_http_{getattr(resp, 'status_code', 'unknown')}{suffix}")
+        payload = _response_json(resp)
+        continue_url = str(payload.get("continue_url") or "").strip()
+        page_type = str(((payload.get("page") or {}).get("type")) or "").strip()
+        step(index, f"登录入口完成: {page_type or 'unknown'}")
+        return continue_url
+
+    def _prepare_passwordless_login(self, session: Any, continue_url: str) -> tuple[str, Any]:
+        candidates: list[str] = []
+        remembered_url = _normalize_auth_url(continue_url)
+        if remembered_url:
+            candidates.append(remembered_url)
+        candidates.extend((f"{auth_base}/log-in/password", f"{auth_base}/log-in", f"{auth_base}/log-in/passwordless"))
+        last_resp = None
+        seen: set[str] = set()
+        for target in candidates:
+            target = _normalize_auth_url(target)
+            if not target or target in seen:
+                continue
+            seen.add(target)
+            resp, _error = request_with_local_retry(
+                session,
+                "get",
+                target,
+                headers=self._navigate_headers(f"{auth_base}/log-in"),
+                allow_redirects=True,
+                verify=False,
+            )
+            last_resp = resp
+            if resp is not None and getattr(resp, "status_code", 0) < 400 and not _response_landed_on_error_page(resp):
+                return _normalize_auth_url(str(getattr(resp, "url", "") or "").strip()) or target, resp
+        return remembered_url or f"{auth_base}/log-in/passwordless", last_resp
+
+    def _send_login_otp(self, index: int, session: Any, device_id: str, continue_url: str) -> str:
+        step(index, "开始发送登录验证码")
+        login_referer, prepare_resp = self._prepare_passwordless_login(session, continue_url)
+        url = f"{auth_base}/api/accounts/passwordless/send-otp"
+        for include_flow in (True, False):
+            headers = (
+                self._flow_headers(login_referer, session=session, device_id=device_id, flow="passwordless_login_send_otp")
+                if include_flow
+                else self._flow_headers(login_referer, session=session, device_id=device_id)
+            )
+            headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
+            resp, error = request_with_local_retry(session, "post", url, headers=headers, allow_redirects=True, verify=False)
+            if resp is not None and resp.status_code in (200, 204, 301, 302) and not _response_landed_on_error_page(resp):
+                step(index, "登录验证码发送完成")
+                return login_referer
+            last_error = error or f"passwordless_send_otp_http_{getattr(resp, 'status_code', 'unknown')}"
+
+        fallback_url = f"{auth_base}/api/accounts/email-otp/send"
+        for referer in (login_referer, f"{auth_base}/log-in/passwordless", f"{auth_base}/log-in"):
+            headers = _headers_with_clearance(self._navigate_headers(referer), fallback_url, self.proxy, self.clearance_user_agent)
+            resp, error = request_with_local_retry(session, "get", fallback_url, headers=headers, allow_redirects=True, verify=False)
+            if resp is not None and resp.status_code in (200, 204, 301, 302) and not _response_landed_on_error_page(resp):
+                step(index, "登录验证码发送完成")
+                return referer
+            detail = _response_json(resp) if resp is not None else {}
+            last_error = error or f"login_send_otp_http_{getattr(resp, 'status_code', 'unknown')}"
+            if detail:
+                last_error = f"{last_error}, detail={json.dumps(detail, ensure_ascii=False)}"
+        if prepare_resp is not None and not last_error:
+            last_error = f"passwordless_prepare_http_{getattr(prepare_resp, 'status_code', 'unknown')}"
+        raise RuntimeError(last_error or "login_send_otp_failed")
+
+    def _open_login_verify_page(self, referer: str, index: int, session: Any) -> None:
+        step(index, "打开登录验证码页")
+        resp, error = request_with_local_retry(
+            session,
+            "get",
+            f"{auth_base}/email-verification",
+            headers=self._navigate_headers(referer),
+            allow_redirects=True,
+            verify=False,
+        )
+        if resp is None or resp.status_code != 200:
+            raise RuntimeError(error or f"open_login_verify_page_http_{getattr(resp, 'status_code', 'unknown')}")
+        step(index, "登录验证码页已打开")
+
+    def _establish_login_session_with_email_otp(self, email: str, index: int) -> Any:
+        step(index, "开始建立邮箱验证码登录会话")
+        last_error = ""
+        for attempt in range(1, 4):
+            login_session = create_session(self.proxy)
+            try:
+                _code_verifier, code_challenge = _generate_pkce()
+                params = {
+                    "response_type": "code",
+                    "client_id": login_oauth_client_id,
+                    "redirect_uri": login_oauth_redirect_uri,
+                    "scope": "openid profile email offline_access",
+                    "code_challenge": code_challenge,
+                    "code_challenge_method": "S256",
+                    "state": secrets.token_urlsafe(32),
+                    "prompt": "login",
+                }
+                resp, error = request_with_local_retry(login_session, "get", f"{auth_base}/oauth/authorize?{urlencode(params)}", verify=False)
+                if resp is None:
+                    raise RuntimeError(error or "login_oauth_authorize_failed")
+                login_device_id = str(login_session.cookies.get("oai-did") or self.device_id).strip() or self.device_id
+                continue_url = self._start_login_with_email_otp(email, index, login_session, login_device_id)
+                login_referer = self._send_login_otp(index, login_session, login_device_id, continue_url)
+                self._open_login_verify_page(login_referer, index, login_session)
+                step(index, "开始等待独立登录验证码")
+                code = wait_for_scheduler_code(email, time.time() - 2, "路由器补 login 取码")
+                if not code:
+                    raise RuntimeError("独立登录等待验证码超时")
+                step(index, f"收到独立登录验证码: {code}")
+                resp, reason = validate_otp(login_session, login_device_id, code)
+                if resp is None or resp.status_code != 200:
+                    data = _response_json(resp) if resp is not None else {}
+                    message = str((data.get("error") or {}).get("message") or data.get("message") or "").strip()
+                    raise RuntimeError(reason or f"独立登录验证码校验失败{': ' + message if message else ''}")
+                step(index, "独立登录验证码校验完成")
+                try:
+                    self.session.close()
+                except Exception:
+                    pass
+                self.session = login_session
+                self.device_id = login_device_id
+                return login_session
+            except Exception as exc:
+                last_error = str(exc).strip() or "独立登录失败"
+                try:
+                    login_session.close()
+                except Exception:
+                    pass
+                if attempt < 3:
+                    step(index, f"独立登录失败，第 {attempt}/3 次后重试: {last_error[:180]}", "yellow")
+                    time.sleep(attempt)
+        raise RuntimeError(last_error or "独立登录失败")
+
+    def _login_and_exchange_tokens(self, email: str, index: int) -> dict:
+        step(index, "开始独立登录换 token")
+        self._establish_login_session_with_email_otp(email, index)
+        current_device_id = str(self.session.cookies.get("oai-did") or self.device_id).strip() or self.device_id
+        self.device_id = current_device_id
+        code_verifier, code_challenge = _generate_pkce()
+        params = {
+            "issuer": auth_base,
+            "client_id": platform_oauth_client_id,
+            "audience": platform_oauth_audience,
+            "redirect_uri": platform_oauth_redirect_uri,
+            "device_id": current_device_id,
+            "screen_hint": "login_or_signup",
+            "max_age": "0",
+            "login_hint": email,
+            "scope": "openid profile email offline_access",
+            "response_type": "code",
+            "response_mode": "query",
+            "state": secrets.token_urlsafe(32),
+            "nonce": secrets.token_urlsafe(32),
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+            "auth0Client": platform_auth0_client,
+        }
+        url = f"{auth_base}/api/accounts/authorize?{urlencode(params)}"
+        headers = _headers_with_clearance(self._navigate_headers(f"{platform_base}/"), url, self.proxy, self.clearance_user_agent)
+        resp, error = request_with_local_retry(self.session, "get", url, headers=headers, allow_redirects=False, verify=False)
+        if resp is None:
+            raise RuntimeError(error or "platform_login_authorize_failed")
+        step(index, "平台 authorize 完成")
+        continue_url = str(resp.headers.get("Location") or "").strip()
+        if continue_url.startswith("/"):
+            continue_url = f"{auth_base}{continue_url}"
+        if not continue_url:
+            response_url = str(getattr(resp, "url", "") or "").strip()
+            if response_url and response_url != url:
+                continue_url = response_url
+        tokens = exchange_platform_tokens_from_callback_url(self.session, code_verifier, continue_url) if continue_url else None
+        if not tokens:
+            tokens = exchange_platform_tokens(self.session, current_device_id, code_verifier, continue_url or f"{auth_base}/sign-in-with-chatgpt/codex/consent")
+        if not tokens:
+            raise RuntimeError("token换取失败")
+        step(index, "token 换取完成")
+        return tokens
+
     def _validate_otp(self, code: str, index: int) -> None:
         step(index, f"开始校验验证码 {code}")
         resp, error = validate_otp(self.session, self.device_id, code)
@@ -583,7 +1024,7 @@ class PlatformRegistrar:
             self._register_user(email, password, index)
             self._send_otp(index)
             step(index, "开始等待注册验证码")
-            code = wait_for_code(mailbox)
+            code = wait_for_code(mailbox, "路由器注册取码")
             if not code:
                 raise RuntimeError("等待注册验证码超时")
             step(index, f"收到注册验证码: {code}")
@@ -604,13 +1045,122 @@ class PlatformRegistrar:
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
 
+    def register_queued(self, index: int, item: dict[str, Any]) -> dict:
+        email = str(item.get("email") or item.get("address") or "").strip().lower()
+        if not email:
+            raise RuntimeError("队列邮箱缺少 email")
+        password = str(item.get("password") or "").strip() or _random_password()
+        mailbox = build_existing_mailbox(email, time.time() - 2)
+        first_name, last_name = _random_name()
+        step(index, f"开始注册队列邮箱: {email}")
+        self._platform_authorize(email, index)
+        self._register_user(email, password, index)
+        mailbox["not_before"] = time.time() - 2
+        self._send_otp(index)
+        step(index, "开始等待队列邮箱注册验证码")
+        code = wait_for_code(mailbox, "路由器注册取码")
+        if not code:
+            raise RuntimeError("等待队列邮箱注册验证码超时")
+        step(index, f"收到队列邮箱注册验证码: {code}")
+        self._validate_otp(code, index)
+        self._create_account(f"{first_name} {last_name}", _random_birthdate(), index)
+        tokens = self._exchange_registered_tokens(index)
+        return {
+            "email": email,
+            "password": password,
+            "access_token": str(tokens.get("access_token") or "").strip(),
+            "refresh_token": str(tokens.get("refresh_token") or "").strip(),
+            "id_token": str(tokens.get("id_token") or "").strip(),
+            "source_type": "web",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
 
-def worker(index: int) -> dict:
+    def register_existing(self, index: int, email: str, password: str = "", mode: str = "auto") -> dict:
+        target_email = str(email or "").strip().lower()
+        if not target_email:
+            raise RuntimeError("缺少待补跑邮箱地址")
+        target_mode = str(mode or "auto").strip().lower()
+        if target_mode not in {"auto", "register", "login"}:
+            target_mode = "auto"
+        target_password = str(password or "").strip() or _random_password()
+        step(index, f"开始补跑邮箱: {target_email}")
+        login_error = ""
+        if target_mode in {"auto", "login"}:
+            try:
+                self._reset_session()
+                tokens = self._login_and_exchange_tokens(target_email, index)
+                return {
+                    "email": target_email,
+                    "password": target_password,
+                    "access_token": str(tokens.get("access_token") or "").strip(),
+                    "refresh_token": str(tokens.get("refresh_token") or "").strip(),
+                    "id_token": str(tokens.get("id_token") or "").strip(),
+                    "source_type": "web",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "mode": "login",
+                }
+            except Exception as exc:
+                login_error = str(exc).strip() or "邮箱登录补登失败"
+                if target_mode == "login":
+                    raise
+                step(index, f"邮箱登录补登失败，回退注册续跑: {login_error[:180]}", "yellow")
+
+        self._reset_session()
+        mailbox = build_existing_mailbox(target_email, time.time() - 2)
+        first_name, last_name = _random_name()
+        self._platform_authorize(target_email, index)
+        self._register_user(target_email, target_password, index)
+        mailbox["not_before"] = time.time() - 2
+        self._send_otp(index)
+        step(index, "开始等待补跑注册验证码")
+        code = wait_for_code(mailbox, "路由器补注册取码")
+        if not code:
+            raise RuntimeError("等待补跑注册验证码超时")
+        step(index, f"收到补跑注册验证码: {code}")
+        self._validate_otp(code, index)
+        self._create_account(f"{first_name} {last_name}", _random_birthdate(), index)
+        tokens = self._exchange_registered_tokens(index)
+        return {
+            "email": target_email,
+            "password": target_password,
+            "access_token": str(tokens.get("access_token") or "").strip(),
+            "refresh_token": str(tokens.get("refresh_token") or "").strip(),
+            "id_token": str(tokens.get("id_token") or "").strip(),
+            "source_type": "web",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "mode": "register",
+            "login_error": login_error,
+        }
+
+
+def _format_proxy_binding_log(listener: dict[str, Any] | None) -> str:
+    data = listener if isinstance(listener, dict) else {}
+    selected_proxy = str(data.get("selected_proxy") or "").strip() or "DIRECT"
+    public_ip = str(data.get("selected_proxy_public_ip") or "").strip()
+    if public_ip:
+        return f"{selected_proxy} @ {public_ip}"
+    return f"{selected_proxy} @ 出口待探测"
+
+
+def _resolve_worker_proxy(index: int, item: dict[str, Any] | None = None) -> dict[str, Any]:
+    if isinstance(item, dict) and "proxy" in item:
+        forced_proxy = str(item.get("proxy") or "").strip()
+        return {"mode": "manual" if forced_proxy else "direct", "proxy": forced_proxy, "listener": None, "snapshot": None}
+    return resolve_register_worker_proxy(config, index)
+
+
+def worker(index: int, item: dict[str, Any] | None = None) -> dict:
     start = time.time()
-    registrar = PlatformRegistrar(config["proxy"])
+    proxy_binding = _resolve_worker_proxy(index, item)
+    registrar = PlatformRegistrar(str(proxy_binding.get("proxy") or ""))
     try:
         step(index, "任务启动")
-        result = registrar.register(index)
+        if proxy_binding.get("mode") == "mihomo":
+            listener = proxy_binding.get("listener") if isinstance(proxy_binding.get("listener"), dict) else {}
+            step(index, f"使用 Mihomo 代理：{_format_proxy_binding_log(listener)}", "yellow")
+        elif proxy_binding.get("mode") == "manual" and proxy_binding.get("proxy"):
+            step(index, f"使用手动代理：{proxy_binding.get('proxy')}", "yellow")
+        result = registrar.register_queued(index, item) if isinstance(item, dict) else registrar.register(index)
         cost = time.time() - start
         access_token = str(result["access_token"])
         account_service.add_account_items([result])
@@ -622,13 +1172,44 @@ def worker(index: int) -> dict:
             stats["success"] += 1
             avg = (time.time() - stats["start_time"]) / stats["success"]
         log(f'{result["email"]} 注册成功，本次耗时{cost:.1f}s，全局平均每个号注册耗时{avg:.1f}s', "green")
-        return {"ok": True, "index": index, "result": result}
+        return {"ok": True, "index": index, "result": result, "item": item or {}}
     except Exception as e:
         cost = time.time() - start
         with stats_lock:
             stats["done"] += 1
             stats["fail"] += 1
         log(f"任务{index} 注册失败，本次耗时{cost:.1f}s，原因: {e}", "red")
-        return {"ok": False, "index": index, "error": str(e)}
+        return {"ok": False, "index": index, "error": str(e), "item": item or {}}
+    finally:
+        registrar.close()
+
+
+def recover_existing_worker(index: int, item: dict[str, Any]) -> dict:
+    start = time.time()
+    proxy_binding = _resolve_worker_proxy(index, item)
+    registrar = PlatformRegistrar(str(proxy_binding.get("proxy") or ""))
+    email = str(item.get("email") or item.get("address") or "").strip().lower()
+    password = str(item.get("password") or "").strip()
+    mode = str(item.get("mode") or "auto").strip().lower() or "auto"
+    try:
+        step(index, f"补 login 任务启动: {email}")
+        if proxy_binding.get("mode") == "mihomo":
+            listener = proxy_binding.get("listener") if isinstance(proxy_binding.get("listener"), dict) else {}
+            step(index, f"使用 Mihomo 代理：{_format_proxy_binding_log(listener)}", "yellow")
+        elif proxy_binding.get("mode") == "manual" and proxy_binding.get("proxy"):
+            step(index, f"使用手动代理：{proxy_binding.get('proxy')}", "yellow")
+        result = registrar.register_existing(index, email, password=password, mode=mode)
+        cost = time.time() - start
+        access_token = str(result["access_token"])
+        account_service.add_account_items([result])
+        refresh_result = account_service.refresh_accounts([access_token])
+        if refresh_result.get("errors"):
+            step(index, f"账号已保存，刷新状态暂未成功，稍后可重试: {refresh_result['errors']}", "yellow")
+        log(f'{result["email"]} 补 login 成功，本次耗时{cost:.1f}s', "green")
+        return {"ok": True, "index": index, "result": result, "item": item}
+    except Exception as e:
+        cost = time.time() - start
+        log(f"任务{index} 补 login 失败，本次耗时{cost:.1f}s，原因: {e}", "red")
+        return {"ok": False, "index": index, "error": str(e), "item": item}
     finally:
         registrar.close()

@@ -325,6 +325,30 @@ export type OutlookPoolStats = {
   failed: number;
 };
 
+export type RegisterQueueItem = {
+  id: string;
+  email: string;
+  password?: string;
+  status: "pending" | "running" | "success" | "failed";
+  retry_count?: number;
+  last_error?: string;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type RegisterFailedItem = {
+  id: string;
+  email: string;
+  password?: string;
+  mode: "auto" | "register" | "login";
+  status: "queued" | "running" | "success" | "failed";
+  retry_count?: number;
+  last_error?: string;
+  source?: string;
+  created_at?: string;
+  updated_at?: string;
+};
+
 export type RegisterConfig = {
   enabled: boolean;
   mail: {
@@ -333,7 +357,16 @@ export type RegisterConfig = {
     wait_interval: number;
     providers: Array<Record<string, unknown>>;
   };
+  scheduler: {
+    fetch_otp_url: string;
+    request_timeout: number;
+    wait_timeout: number;
+    wait_interval: number;
+  };
   proxy: string;
+  proxy_mode: "direct" | "manual" | "mihomo";
+  mihomo?: Record<string, unknown>;
+  mimo?: Record<string, unknown>;
   total: number;
   threads: number;
   mode: "total" | "quota" | "available";
@@ -361,6 +394,10 @@ export type RegisterConfig = {
     text: string;
     level: string;
   }>;
+  queue_items?: RegisterQueueItem[];
+  failed_items?: RegisterFailedItem[];
+  failed_retry?: Record<string, unknown>;
+  proxy_status?: Record<string, unknown>;
 };
 
 export async function login(authKey: string) {
@@ -750,6 +787,60 @@ export async function updateRegisterConfig(updates: Partial<RegisterConfig>) {
     method: "POST",
     body: updates,
   });
+}
+
+export async function importRegisterQueue(text: string) {
+  return httpRequest<{ register: RegisterConfig }>("/api/register/queue/import", {
+    method: "POST",
+    body: { text },
+  });
+}
+
+export async function removeRegisterQueue(ids: string[]) {
+  return httpRequest<{ register: RegisterConfig }>("/api/register/queue/remove", {
+    method: "POST",
+    body: { ids },
+  });
+}
+
+export async function clearRegisterQueue(scope = "all") {
+  return httpRequest<{ register: RegisterConfig }>("/api/register/queue/clear", {
+    method: "POST",
+    body: { scope },
+  });
+}
+
+export async function retryFailedRegister(ids: string[], mode: "auto" | "register" | "login" = "auto") {
+  return httpRequest<{ register: RegisterConfig }>("/api/register/failed/retry", {
+    method: "POST",
+    body: { ids, mode },
+  });
+}
+
+export async function removeFailedRegister(ids: string[]) {
+  return httpRequest<{ register: RegisterConfig }>("/api/register/failed/remove", {
+    method: "POST",
+    body: { ids },
+  });
+}
+
+export async function clearFailedRegister() {
+  return httpRequest<{ register: RegisterConfig }>("/api/register/failed/clear", { method: "POST" });
+}
+
+export async function queueLoginRecovery(text: string) {
+  return httpRequest<{ register: RegisterConfig }>("/api/register/recovery/import", {
+    method: "POST",
+    body: { text },
+  });
+}
+
+export async function refreshRegisterProxy() {
+  return httpRequest<{ register: RegisterConfig }>("/api/register/proxy/refresh", { method: "POST" });
+}
+
+export async function stopRegisterProxyRuntime() {
+  return httpRequest<{ register: RegisterConfig }>("/api/register/proxy/stop", { method: "POST" });
 }
 
 export async function startRegister() {

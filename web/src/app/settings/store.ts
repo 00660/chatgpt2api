@@ -11,8 +11,16 @@ import {
   fetchCPAPools,
   fetchBackups,
   fetchRegisterConfig,
+  clearFailedRegister as clearFailedRegisterApi,
+  clearRegisterQueue as clearRegisterQueueApi,
+  importRegisterQueue as importRegisterQueueApi,
+  queueLoginRecovery as queueLoginRecoveryApi,
+  refreshRegisterProxy as refreshRegisterProxyApi,
+  removeFailedRegister as removeFailedRegisterApi,
+  removeRegisterQueue as removeRegisterQueueApi,
   resetRegister as resetRegisterApi,
   resetOutlookPool as resetOutlookPoolApi,
+  retryFailedRegister as retryFailedRegisterApi,
   fetchSettingsConfig,
   runBackupNow,
   syncImageStorage,
@@ -118,7 +126,7 @@ function normalizeProxyRuntime(value: unknown): ProxyRuntimeSettings {
 function normalizeThirdPartyApps(value: unknown): ThirdPartyAppsSettings {
   const source = typeof value === "object" && value !== null ? value as Partial<ThirdPartyAppsSettings> : {};
   const canvas = typeof source.infinite_canvas === "object" && source.infinite_canvas
-    ? source.infinite_canvas
+    ? source.infinite_canvas as Partial<ThirdPartyAppsSettings["infinite_canvas"]>
     : {};
   return {
     infinite_canvas: {
@@ -251,6 +259,27 @@ function normalizeFiles(items: CPARemoteFile[]) {
   return files;
 }
 
+function buildRegisterUpdate(registerConfig: RegisterConfig): Partial<RegisterConfig> {
+  return {
+    scheduler: {
+      fetch_otp_url: String(registerConfig.scheduler?.fetch_otp_url || "").trim(),
+      request_timeout: Math.max(1, Number(registerConfig.scheduler?.request_timeout) || 8),
+      wait_timeout: Math.max(1, Number(registerConfig.scheduler?.wait_timeout) || 120),
+      wait_interval: Math.max(1, Number(registerConfig.scheduler?.wait_interval) || 2),
+    },
+    proxy: registerConfig.proxy.trim(),
+    proxy_mode: registerConfig.proxy_mode || "direct",
+    mihomo: registerConfig.mimo || registerConfig.mihomo || {},
+    mimo: registerConfig.mimo || registerConfig.mihomo || {},
+    total: Math.max(1, Number(registerConfig.total) || 1),
+    threads: Math.max(1, Number(registerConfig.threads) || 1),
+    mode: registerConfig.mode,
+    target_quota: Math.max(1, Number(registerConfig.target_quota) || 1),
+    target_available: Math.max(1, Number(registerConfig.target_available) || 1),
+    check_interval: Math.max(1, Number(registerConfig.check_interval) || 5),
+  };
+}
+
 type SettingsStore = {
   config: SettingsConfig | null;
   isLoadingConfig: boolean;
@@ -333,10 +362,21 @@ type SettingsStore = {
   setRegisterTargetQuota: (value: string) => void;
   setRegisterTargetAvailable: (value: string) => void;
   setRegisterCheckInterval: (value: string) => void;
+  setRegisterSchedulerField: (key: keyof RegisterConfig["scheduler"], value: string) => void;
+  setRegisterProxyMode: (value: "direct" | "manual" | "mihomo") => void;
+  setRegisterMimoField: (key: string, value: string | number | boolean) => void;
   setRegisterMailField: (key: "request_timeout" | "wait_timeout" | "wait_interval", value: string) => void;
   addRegisterProvider: () => void;
   updateRegisterProvider: (index: number, updates: Record<string, unknown>) => void;
   deleteRegisterProvider: (index: number) => void;
+  importRegisterQueueText: (text: string) => Promise<void>;
+  removeRegisterQueueItem: (id: string) => Promise<void>;
+  clearRegisterQueueItems: (scope?: string) => Promise<void>;
+  queueLoginRecoveryText: (text: string) => Promise<void>;
+  retryFailedRegisterItems: (ids: string[], mode: "auto" | "register" | "login") => Promise<void>;
+  removeFailedRegisterItem: (id: string) => Promise<void>;
+  clearFailedRegisterItems: () => Promise<void>;
+  refreshRegisterProxyRuntime: () => Promise<void>;
   saveRegister: () => Promise<void>;
   toggleRegister: () => Promise<void>;
   resetRegister: () => Promise<void>;
@@ -922,6 +962,31 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set((state) => state.registerConfig ? { registerConfig: { ...state.registerConfig, check_interval: Number(value) || 0 } } : {});
   },
 
+  setRegisterSchedulerField: (key, value) => {
+    set((state) => state.registerConfig ? {
+      registerConfig: {
+        ...state.registerConfig,
+        scheduler: {
+          ...state.registerConfig.scheduler,
+          [key]: key === "fetch_otp_url" ? value : Number(value) || 0,
+        },
+      },
+    } : {});
+  },
+
+  setRegisterProxyMode: (value) => {
+    set((state) => state.registerConfig ? { registerConfig: { ...state.registerConfig, proxy_mode: value } } : {});
+  },
+
+  setRegisterMimoField: (key, value) => {
+    set((state) => {
+      if (!state.registerConfig) return {};
+      const current = { ...(state.registerConfig.mimo || state.registerConfig.mihomo || {}) };
+      const next = { ...current, [key]: value };
+      return { registerConfig: { ...state.registerConfig, mimo: next, mihomo: next } };
+    });
+  },
+
   setRegisterMailField: (key, value) => {
     set((state) => state.registerConfig ? {
       registerConfig: {
@@ -967,21 +1032,116 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     } : {});
   },
 
+  importRegisterQueueText: async (text) => {
+    set({ isSavingRegister: true });
+    try {
+      const data = await importRegisterQueueApi(text);
+      set({ registerConfig: data.register });
+      toast.success("待注册邮箱已导入");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "导入待注册邮箱失败");
+    } finally {
+      set({ isSavingRegister: false });
+    }
+  },
+
+  removeRegisterQueueItem: async (id) => {
+    set({ isSavingRegister: true });
+    try {
+      const data = await removeRegisterQueueApi([id]);
+      set({ registerConfig: data.register });
+      toast.success("队列邮箱已删除");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "删除队列邮箱失败");
+    } finally {
+      set({ isSavingRegister: false });
+    }
+  },
+
+  clearRegisterQueueItems: async (scope = "all") => {
+    set({ isSavingRegister: true });
+    try {
+      const data = await clearRegisterQueueApi(scope);
+      set({ registerConfig: data.register });
+      toast.success("注册队列已清空");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "清空注册队列失败");
+    } finally {
+      set({ isSavingRegister: false });
+    }
+  },
+
+  queueLoginRecoveryText: async (text) => {
+    set({ isSavingRegister: true });
+    try {
+      const data = await queueLoginRecoveryApi(text);
+      set({ registerConfig: data.register });
+      toast.success("补 login 已启动");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "启动补 login 失败");
+    } finally {
+      set({ isSavingRegister: false });
+    }
+  },
+
+  retryFailedRegisterItems: async (ids, mode) => {
+    set({ isSavingRegister: true });
+    try {
+      const data = await retryFailedRegisterApi(ids, mode);
+      set({ registerConfig: data.register });
+      toast.success("恢复任务已启动");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "启动恢复任务失败");
+    } finally {
+      set({ isSavingRegister: false });
+    }
+  },
+
+  removeFailedRegisterItem: async (id) => {
+    set({ isSavingRegister: true });
+    try {
+      const data = await removeFailedRegisterApi([id]);
+      set({ registerConfig: data.register });
+      toast.success("恢复记录已删除");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "删除恢复记录失败");
+    } finally {
+      set({ isSavingRegister: false });
+    }
+  },
+
+  clearFailedRegisterItems: async () => {
+    set({ isSavingRegister: true });
+    try {
+      const data = await clearFailedRegisterApi();
+      set({ registerConfig: data.register });
+      toast.success("恢复记录已清空");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "清空恢复记录失败");
+    } finally {
+      set({ isSavingRegister: false });
+    }
+  },
+
+  refreshRegisterProxyRuntime: async () => {
+    set({ isSavingRegister: true });
+    try {
+      const data = await refreshRegisterProxyApi();
+      set({ registerConfig: data.register });
+      toast.success("mimo 代理已刷新");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "刷新 mimo 代理失败");
+    } finally {
+      set({ isSavingRegister: false });
+    }
+  },
+
   saveRegister: async () => {
     const { registerConfig } = get();
     if (!registerConfig) return;
     try {
       set({ isSavingRegister: true });
-      const data = await updateRegisterConfig({
-        mail: registerConfig.mail,
-        proxy: registerConfig.proxy.trim(),
-        total: Math.max(1, Number(registerConfig.total) || 1),
-        threads: Math.max(1, Number(registerConfig.threads) || 1),
-        mode: registerConfig.mode,
-        target_quota: Math.max(1, Number(registerConfig.target_quota) || 1),
-        target_available: Math.max(1, Number(registerConfig.target_available) || 1),
-        check_interval: Math.max(1, Number(registerConfig.check_interval) || 5),
-      });
+      const data = await updateRegisterConfig(buildRegisterUpdate(registerConfig));
       set({ registerConfig: data.register });
       toast.success("注册配置已保存");
     } catch (error) {
@@ -997,16 +1157,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set({ isSavingRegister: true });
     try {
       if (!registerConfig.enabled) {
-        await updateRegisterConfig({
-          mail: registerConfig.mail,
-          proxy: registerConfig.proxy.trim(),
-          total: Math.max(1, Number(registerConfig.total) || 1),
-          threads: Math.max(1, Number(registerConfig.threads) || 1),
-          mode: registerConfig.mode,
-          target_quota: Math.max(1, Number(registerConfig.target_quota) || 1),
-          target_available: Math.max(1, Number(registerConfig.target_available) || 1),
-          check_interval: Math.max(1, Number(registerConfig.check_interval) || 5),
-        });
+        await updateRegisterConfig(buildRegisterUpdate(registerConfig));
       }
       const data = registerConfig.enabled ? await stopRegister() : await startRegister();
       set({ registerConfig: data.register });
