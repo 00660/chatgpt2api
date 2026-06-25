@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Toaster } from "sonner";
 import "./globals.css";
+import { LegacyPolyfills } from "@/components/legacy-polyfills";
 import { ThemeScript } from "@/components/theme-script";
 import { TopNav } from "@/components/top-nav";
 
@@ -28,6 +29,7 @@ export default function RootLayout({
   return (
     <html lang="zh-CN" suppressHydrationWarning>
       <head>
+        <LegacyPolyfills />
         <ThemeScript />
       </head>
       <body

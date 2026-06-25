@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "next dev --webpack -H 0.0.0.0",
-    "build": "next build",
+    "build": "next build && node scripts/legacy-ios-build.mjs",
     "start": "next start"
   },
   "dependencies": {
@@ -44,6 +44,7 @@
     "@umijs/openapi": "^1.13.15",
     "eslint": "^9",
     "eslint-config-next": "16.2.3",
+    "esbuild": "^0.25.0",
     "eslint-config-prettier": "^10.1.8",
     "prettier-plugin-organize-imports": "^4.2.0",
     "prettier-plugin-tailwindcss": "^0.6.14",

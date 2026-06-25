@@ -19,11 +19,11 @@ from services.image_service import start_image_cleanup_scheduler
 def create_stale_chunk_response(app_version: str) -> Response:
     version_json = json.dumps(app_version)
     script = f"""
-(() => {{
-  const version = {version_json};
-  const param = "_chatgpt2api_reload";
+(function () {{
+  var version = {version_json};
+  var param = "_chatgpt2api_reload";
   try {{
-    const url = new URL(window.location.href);
+    var url = new URL(window.location.href);
     if (url.searchParams.get(param) === version) {{
       return;
     }}
@@ -32,14 +32,20 @@ def create_stale_chunk_response(app_version: str) -> Response:
       if (window.sessionStorage) {{
         window.sessionStorage.setItem("chatgpt2api_stale_chunk_reload", version);
       }}
-    }} catch {{}}
+    }} catch (storageError) {{}}
     try {{
       if (window.caches) {{
-        window.caches.keys().then((keys) => Promise.all(keys.map((key) => window.caches.delete(key)))).catch(() => undefined);
+        window.caches.keys().then(function (keys) {{
+          return Promise.all(keys.map(function (key) {{
+            return window.caches.delete(key);
+          }}));
+        }}).catch(function () {{
+          return undefined;
+        }});
       }}
-    }} catch {{}}
+    }} catch (cacheError) {{}}
     window.location.replace(url.toString());
-  }} catch {{
+  }} catch (error) {{
     window.location.reload();
   }}
 }})();
