@@ -29,6 +29,57 @@ function providerAccountsText(value: unknown) {
   return String(value || "");
 }
 
+type ImapAccountRow = {
+  email: string;
+  password: string;
+};
+
+function parseProviderAccounts(value: unknown): ImapAccountRow[] {
+  const text = providerAccountsText(value);
+  const rows: ImapAccountRow[] = [];
+  const seen = new Set<string>();
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const parts = line.includes("----")
+      ? line.split("----")
+      : line.includes("|")
+        ? line.split("|")
+        : line.includes("\t")
+          ? line.split("\t")
+          : line.split(/\s+/);
+    const email = String(parts[0] || "").trim();
+    const password = parts.slice(1).join(parts.length > 2 && line.includes("----") ? "----" : " ").trim();
+    const key = email.toLowerCase();
+    if (!email || !password || seen.has(key)) continue;
+    seen.add(key);
+    rows.push({ email, password });
+  }
+  return rows;
+}
+
+function serializeImapAccounts(rows: ImapAccountRow[]) {
+  return rows.map((row) => `${row.email.trim()}----${row.password.trim()}`).filter((line) => !line.startsWith("----") && !line.endsWith("----")).join("\n");
+}
+
+function primaryImapProvider(providers: Array<Record<string, unknown>>) {
+  const current = providers.find((provider) => String(provider.type || "") === "imap") || {};
+  const allAccounts = providers
+    .filter((provider) => String(provider.type || "") === "imap")
+    .flatMap((provider) => parseProviderAccounts(provider.accounts || provider.mailboxes || provider.pool));
+  return {
+    enable: true,
+    type: "imap",
+    imap_host: "",
+    imap_port: 993,
+    ssl: true,
+    folder: "INBOX",
+    message_limit: 20,
+    accounts: serializeImapAccounts(allAccounts),
+    ...current,
+  };
+}
+
 function statusClass(status: string) {
   if (status === "success") return "bg-emerald-50 text-emerald-700";
   if (status === "running" || status === "queued") return "bg-sky-50 text-sky-700";
@@ -44,6 +95,9 @@ function formatUnixTime(value: unknown) {
 export function RegisterCard({ initialTab = "queue" }: { initialTab?: "queue" | "scheduler" | "recovery" | "mimo" }) {
   const [queueText, setQueueText] = useState("");
   const [recoveryText, setRecoveryText] = useState("");
+  const [imapEmail, setImapEmail] = useState("");
+  const [imapPassword, setImapPassword] = useState("");
+  const [imapImportText, setImapImportText] = useState("");
   const config = useSettingsStore((state) => state.registerConfig);
   const isLoading = useSettingsStore((state) => state.isLoadingRegister);
   const isSaving = useSettingsStore((state) => state.isSavingRegister);
@@ -56,9 +110,7 @@ export function RegisterCard({ initialTab = "queue" }: { initialTab?: "queue" | 
   const setCheckInterval = useSettingsStore((state) => state.setRegisterCheckInterval);
   const setSchedulerField = useSettingsStore((state) => state.setRegisterSchedulerField);
   const setMailField = useSettingsStore((state) => state.setRegisterMailField);
-  const addProvider = useSettingsStore((state) => state.addRegisterProvider);
-  const updateProvider = useSettingsStore((state) => state.updateRegisterProvider);
-  const deleteProvider = useSettingsStore((state) => state.deleteRegisterProvider);
+  const setImapProvider = useSettingsStore((state) => state.setRegisterImapProvider);
   const setProxyMode = useSettingsStore((state) => state.setRegisterProxyMode);
   const setMimoField = useSettingsStore((state) => state.setRegisterMimoField);
   const importQueue = useSettingsStore((state) => state.importRegisterQueueText);
@@ -93,8 +145,11 @@ export function RegisterCard({ initialTab = "queue" }: { initialTab?: "queue" | 
   const proxyStatus = (config.proxy_status || {}) as Record<string, unknown>;
   const imapDispatch = (config.imap_dispatch || {}) as Record<string, unknown>;
   const imapDispatchItems = Array.isArray(imapDispatch.items) ? imapDispatch.items as Array<Record<string, unknown>> : [];
+  const imapProvider = primaryImapProvider((mail.providers || []) as Array<Record<string, unknown>>) as Record<string, unknown>;
+  const imapAccounts = parseProviderAccounts(imapProvider.accounts || imapProvider.mailboxes || imapProvider.pool);
   const listenerLines = Array.isArray(proxyStatus.selected_proxy_speed_lines) ? proxyStatus.selected_proxy_speed_lines.map(String) : [];
   const selectedFailedIds = failedItems.filter((item) => item.status !== "running" && item.status !== "success").map((item) => item.id);
+  const updateImapAccounts = (rows: ImapAccountRow[]) => setImapProvider({ ...imapProvider, accounts: serializeImapAccounts(rows) });
 
   return (
     <div className="grid h-[calc(100vh-132px)] min-h-[640px] items-stretch gap-0 overflow-hidden rounded-xl border border-stone-200 bg-white/70 xl:grid-cols-2">
@@ -212,12 +267,90 @@ export function RegisterCard({ initialTab = "queue" }: { initialTab?: "queue" | 
               </div>
             </div>
 
-            <div className="flex items-center justify-between gap-3 border-t border-stone-200 pt-4">
-              <div className="text-sm font-medium text-stone-800">IMAP 账号池</div>
-              <Button variant="outline" className="h-9 rounded-xl border-stone-200 bg-white px-3 text-stone-700" onClick={() => addProvider()} disabled={config.enabled}>
-                <UserPlus className="size-4" />
-                添加 IMAP
-              </Button>
+            <div className="space-y-3 border-t border-stone-200 pt-4">
+              <div className="text-sm font-medium text-stone-800">IMAP 调度台</div>
+              <div className="grid gap-3 md:grid-cols-[1fr_110px_120px_90px]">
+                <div className="space-y-2">
+                  <label className="text-sm text-stone-700">IMAP Host</label>
+                  <Input value={String(imapProvider.imap_host || imapProvider.host || "")} onChange={(event) => setImapProvider({ ...imapProvider, imap_host: event.target.value })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm text-stone-700">端口</label>
+                  <Input value={String(imapProvider.imap_port || imapProvider.port || 993)} onChange={(event) => setImapProvider({ ...imapProvider, imap_port: Number(event.target.value) || 993 })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm text-stone-700">文件夹</label>
+                  <Input value={String(imapProvider.folder || "INBOX")} onChange={(event) => setImapProvider({ ...imapProvider, folder: event.target.value })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm text-stone-700">邮件数</label>
+                  <Input value={String(imapProvider.message_limit || 20)} onChange={(event) => setImapProvider({ ...imapProvider, message_limit: Number(event.target.value) || 20 })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-3 border border-stone-200 bg-white/70 p-3">
+              <div className="grid gap-3 md:grid-cols-[1fr_1fr_auto]">
+                <div className="space-y-2">
+                  <label className="text-sm text-stone-700">账号</label>
+                  <Input value={imapEmail} onChange={(event) => setImapEmail(event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm text-stone-700">授权码</label>
+                  <Input value={imapPassword} onChange={(event) => setImapPassword(event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
+                </div>
+                <div className="flex items-end">
+                  <Button variant="outline" className="h-10 rounded-xl border-stone-200 bg-white px-3 text-stone-700" onClick={() => {
+                    const email = imapEmail.trim();
+                    const password = imapPassword.trim();
+                    if (!email || !password) return;
+                    updateImapAccounts([...imapAccounts.filter((item) => item.email.toLowerCase() !== email.toLowerCase()), { email, password }]);
+                    setImapEmail("");
+                    setImapPassword("");
+                  }} disabled={config.enabled || !imapEmail.trim() || !imapPassword.trim()}>
+                    <UserPlus className="size-4" />
+                    添加账号
+                  </Button>
+                </div>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-[1fr_auto]">
+                <Textarea value={imapImportText} onChange={(event) => setImapImportText(event.target.value)} placeholder={"email@example.com----password"} className="min-h-20 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
+                <div className="flex items-end">
+                  <Button variant="outline" className="h-10 rounded-xl border-stone-200 bg-white px-3 text-stone-700" onClick={() => {
+                    const imported = parseProviderAccounts(imapImportText);
+                    const merged = [...imapAccounts];
+                    for (const account of imported) {
+                      const existing = merged.findIndex((item) => item.email.toLowerCase() === account.email.toLowerCase());
+                      if (existing >= 0) merged[existing] = account;
+                      else merged.push(account);
+                    }
+                    updateImapAccounts(merged);
+                    setImapImportText("");
+                  }} disabled={config.enabled || !imapImportText.trim()}>
+                    <Upload className="size-4" />
+                    导入文本
+                  </Button>
+                </div>
+              </div>
+
+              <div className="max-h-52 overflow-y-auto border border-stone-100 bg-white">
+                {imapAccounts.length === 0 ? (
+                  <div className="p-3 text-sm text-stone-500">IMAP 账号池为空</div>
+                ) : (
+                  imapAccounts.map((account) => (
+                    <div key={account.email} className="grid grid-cols-[1fr_auto] items-center gap-3 border-b border-stone-100 px-3 py-2 last:border-b-0">
+                      <div className="min-w-0">
+                        <div className="truncate font-mono text-xs text-stone-800">{account.email}</div>
+                        <div className="mt-1 truncate font-mono text-xs text-stone-500">{account.password}</div>
+                      </div>
+                      <button type="button" className="rounded-lg p-2 text-stone-400 transition hover:bg-rose-50 hover:text-rose-500 disabled:opacity-50" onClick={() => updateImapAccounts(imapAccounts.filter((item) => item.email !== account.email))} disabled={config.enabled} title="删除">
+                        <Trash2 className="size-4" />
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
 
             <div className="space-y-2 border border-stone-200 bg-white/70 p-3">
@@ -252,43 +385,6 @@ export function RegisterCard({ initialTab = "queue" }: { initialTab?: "queue" | 
                     );
                   })}
                 </div>
-              )}
-            </div>
-
-            <div className="space-y-3">
-              {(mail.providers || []).length === 0 ? (
-                <div className="border border-stone-200 bg-white/70 p-4 text-sm text-stone-500">IMAP 账号池为空</div>
-              ) : (
-                (mail.providers || []).map((provider, index) => {
-                  const row = provider as Record<string, unknown>;
-                  return (
-                    <div key={index} className="space-y-3 border border-stone-200 bg-white/70 p-3">
-                      <div className="grid gap-3 md:grid-cols-[1fr_120px_90px_auto]">
-                        <div className="space-y-2">
-                          <label className="text-sm text-stone-700">IMAP Host</label>
-                          <Input value={String(row.imap_host || row.host || "")} onChange={(event) => updateProvider(index, { type: "imap", imap_host: event.target.value })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
-                        </div>
-                        <div className="space-y-2">
-                          <label className="text-sm text-stone-700">端口</label>
-                          <Input value={String(row.imap_port || row.port || 993)} onChange={(event) => updateProvider(index, { type: "imap", imap_port: Number(event.target.value) || 993 })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
-                        </div>
-                        <div className="space-y-2">
-                          <label className="text-sm text-stone-700">邮件数</label>
-                          <Input value={String(row.message_limit || 20)} onChange={(event) => updateProvider(index, { type: "imap", message_limit: Number(event.target.value) || 20 })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
-                        </div>
-                        <div className="flex items-end">
-                          <button type="button" className="rounded-lg p-2 text-stone-400 transition hover:bg-rose-50 hover:text-rose-500 disabled:opacity-50" onClick={() => deleteProvider(index)} disabled={config.enabled} title="删除">
-                            <Trash2 className="size-4" />
-                          </button>
-                        </div>
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-sm text-stone-700">账号文本</label>
-                        <Textarea value={providerAccountsText(row.accounts || row.mailboxes || row.pool)} onChange={(event) => updateProvider(index, { enable: true, type: "imap", accounts: event.target.value })} placeholder={"每行一个账号：\nemail@example.com----password"} className="min-h-24 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
-                      </div>
-                    </div>
-                  );
-                })
               )}
             </div>
           </TabsContent>

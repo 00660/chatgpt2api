@@ -259,13 +259,56 @@ function normalizeFiles(items: CPARemoteFile[]) {
   return files;
 }
 
+function providerAccountsText(value: unknown) {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => {
+        if (typeof item === "string") return item.trim();
+        if (item && typeof item === "object") {
+          const row = item as Record<string, unknown>;
+          return `${String(row.email || row.address || "").trim()}----${String(row.password || "").trim()}`;
+        }
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  return String(value || "").trim();
+}
+
+function normalizeRegisterProviders(providers: Array<Record<string, unknown>> | undefined) {
+  const imapProviders = (providers || []).filter((provider) => String(provider.type || "") === "imap");
+  if (imapProviders.length === 0) return [];
+  const first = imapProviders[0] || {};
+  const accountLines = imapProviders
+    .map((provider) => providerAccountsText(provider.accounts || provider.mailboxes || provider.pool))
+    .filter(Boolean)
+    .join("\n");
+  const hasConfig = Boolean(
+    String(first.imap_host || first.host || "").trim() ||
+    accountLines.trim()
+  );
+  if (!hasConfig) return [];
+  return [{
+    ...first,
+    enable: true,
+    type: "imap",
+    imap_host: String(first.imap_host || first.host || "").trim(),
+    imap_port: Math.max(1, Number(first.imap_port || first.port) || 993),
+    ssl: first.ssl !== false,
+    folder: String(first.folder || "INBOX").trim() || "INBOX",
+    message_limit: Math.max(1, Number(first.message_limit) || 20),
+    accounts: accountLines,
+  }];
+}
+
 function buildRegisterUpdate(registerConfig: RegisterConfig): Partial<RegisterConfig> {
   return {
     mail: {
       request_timeout: Math.max(1, Number(registerConfig.mail?.request_timeout) || 30),
       wait_timeout: Math.max(1, Number(registerConfig.mail?.wait_timeout) || 120),
       wait_interval: Math.max(1, Number(registerConfig.mail?.wait_interval) || 2),
-      providers: registerConfig.mail?.providers || [],
+      providers: normalizeRegisterProviders(registerConfig.mail?.providers as Array<Record<string, unknown>> | undefined),
     },
     scheduler: {
       fetch_otp_url: "",
@@ -372,6 +415,7 @@ type SettingsStore = {
   setRegisterProxyMode: (value: "direct" | "manual" | "mihomo") => void;
   setRegisterMimoField: (key: string, value: string | number | boolean) => void;
   setRegisterMailField: (key: "request_timeout" | "wait_timeout" | "wait_interval", value: string) => void;
+  setRegisterImapProvider: (updates: Record<string, unknown>) => void;
   addRegisterProvider: () => void;
   updateRegisterProvider: (index: number, updates: Record<string, unknown>) => void;
   deleteRegisterProvider: (index: number) => void;
@@ -1000,6 +1044,26 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         mail: { ...state.registerConfig.mail, [key]: Number(value) || 0 },
       },
     } : {});
+  },
+
+  setRegisterImapProvider: (updates) => {
+    set((state) => {
+      if (!state.registerConfig) return {};
+      const current = (state.registerConfig.mail.providers || []).find((provider) => String(provider.type || "") === "imap") || {};
+      const next = {
+        enable: true,
+        type: "imap",
+        imap_host: "",
+        imap_port: 993,
+        ssl: true,
+        folder: "INBOX",
+        message_limit: 20,
+        accounts: "",
+        ...current,
+        ...updates,
+      };
+      return { registerConfig: { ...state.registerConfig, mail: { ...state.registerConfig.mail, providers: [next] } } };
+    });
   },
 
   addRegisterProvider: () => {
