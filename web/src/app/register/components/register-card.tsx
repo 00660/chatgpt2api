@@ -97,7 +97,6 @@ export function RegisterCard({ initialTab = "queue" }: { initialTab?: "queue" | 
   const [recoveryText, setRecoveryText] = useState("");
   const [imapEmail, setImapEmail] = useState("");
   const [imapPassword, setImapPassword] = useState("");
-  const [imapImportText, setImapImportText] = useState("");
   const config = useSettingsStore((state) => state.registerConfig);
   const isLoading = useSettingsStore((state) => state.isLoadingRegister);
   const isSaving = useSettingsStore((state) => state.isSavingRegister);
@@ -147,6 +146,11 @@ export function RegisterCard({ initialTab = "queue" }: { initialTab?: "queue" | 
   const imapDispatchItems = Array.isArray(imapDispatch.items) ? imapDispatch.items as Array<Record<string, unknown>> : [];
   const imapProvider = primaryImapProvider((mail.providers || []) as Array<Record<string, unknown>>) as Record<string, unknown>;
   const imapAccounts = parseProviderAccounts(imapProvider.accounts || imapProvider.mailboxes || imapProvider.pool);
+  const imapHost = String(imapProvider.imap_host || imapProvider.host || "");
+  const configuredImapProviderKind = String(imapProvider.imap_provider || "");
+  const imapProviderKind = configuredImapProviderKind === "163" || configuredImapProviderKind === "icloud" || configuredImapProviderKind === "custom"
+    ? configuredImapProviderKind
+    : imapHost.includes("mail.me.com") ? "icloud" : imapHost.includes("163.com") || !imapHost ? "163" : "custom";
   const listenerLines = Array.isArray(proxyStatus.selected_proxy_speed_lines) ? proxyStatus.selected_proxy_speed_lines.map(String) : [];
   const selectedFailedIds = failedItems.filter((item) => item.status !== "running" && item.status !== "success").map((item) => item.id);
   const updateImapAccounts = (rows: ImapAccountRow[]) => setImapProvider({ ...imapProvider, accounts: serializeImapAccounts(rows) });
@@ -269,7 +273,24 @@ export function RegisterCard({ initialTab = "queue" }: { initialTab?: "queue" | 
 
             <div className="space-y-3 border-t border-stone-200 pt-4">
               <div className="text-sm font-medium text-stone-800">IMAP 调度台</div>
-              <div className="grid gap-3 md:grid-cols-[1fr_110px_120px_90px]">
+              <div className="grid gap-3 md:grid-cols-[130px_1fr_110px_120px_90px]">
+                <div className="space-y-2">
+                  <label className="text-sm text-stone-700">收信类型</label>
+                  <Select value={imapProviderKind} onValueChange={(value) => {
+                    if (value === "163") setImapProvider({ ...imapProvider, imap_provider: "163", imap_host: "imap.163.com", imap_port: 993, folder: "INBOX" });
+                    else if (value === "icloud") setImapProvider({ ...imapProvider, imap_provider: "icloud", imap_host: "imap.mail.me.com", imap_port: 993, folder: "INBOX" });
+                    else setImapProvider({ ...imapProvider, imap_provider: "custom", imap_host: "", imap_port: 993, folder: "INBOX" });
+                  }} disabled={config.enabled}>
+                    <SelectTrigger className="h-10 rounded-xl border-stone-200 bg-white">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="163">163</SelectItem>
+                      <SelectItem value="icloud">iCloud</SelectItem>
+                      <SelectItem value="custom">自定义</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
                 <div className="space-y-2">
                   <label className="text-sm text-stone-700">IMAP Host</label>
                   <Input value={String(imapProvider.imap_host || imapProvider.host || "")} onChange={(event) => setImapProvider({ ...imapProvider, imap_host: event.target.value })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
@@ -290,14 +311,15 @@ export function RegisterCard({ initialTab = "queue" }: { initialTab?: "queue" | 
             </div>
 
             <div className="space-y-3 border border-stone-200 bg-white/70 p-3">
+              <div className="text-sm font-medium text-stone-800">账号登录</div>
               <div className="grid gap-3 md:grid-cols-[1fr_1fr_auto]">
                 <div className="space-y-2">
-                  <label className="text-sm text-stone-700">账号</label>
+                  <label className="text-sm text-stone-700">主收信邮箱</label>
                   <Input value={imapEmail} onChange={(event) => setImapEmail(event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
                 </div>
                 <div className="space-y-2">
-                  <label className="text-sm text-stone-700">授权码</label>
-                  <Input value={imapPassword} onChange={(event) => setImapPassword(event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
+                  <label className="text-sm text-stone-700">{imapProviderKind === "icloud" ? "App 专用密码" : "授权码"}</label>
+                  <Input type="password" value={imapPassword} onChange={(event) => setImapPassword(event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
                 </div>
                 <div className="flex items-end">
                   <Button variant="outline" className="h-10 rounded-xl border-stone-200 bg-white px-3 text-stone-700" onClick={() => {
@@ -309,40 +331,20 @@ export function RegisterCard({ initialTab = "queue" }: { initialTab?: "queue" | 
                     setImapPassword("");
                   }} disabled={config.enabled || !imapEmail.trim() || !imapPassword.trim()}>
                     <UserPlus className="size-4" />
-                    添加账号
-                  </Button>
-                </div>
-              </div>
-
-              <div className="grid gap-3 md:grid-cols-[1fr_auto]">
-                <Textarea value={imapImportText} onChange={(event) => setImapImportText(event.target.value)} placeholder={"email@example.com----password"} className="min-h-20 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
-                <div className="flex items-end">
-                  <Button variant="outline" className="h-10 rounded-xl border-stone-200 bg-white px-3 text-stone-700" onClick={() => {
-                    const imported = parseProviderAccounts(imapImportText);
-                    const merged = [...imapAccounts];
-                    for (const account of imported) {
-                      const existing = merged.findIndex((item) => item.email.toLowerCase() === account.email.toLowerCase());
-                      if (existing >= 0) merged[existing] = account;
-                      else merged.push(account);
-                    }
-                    updateImapAccounts(merged);
-                    setImapImportText("");
-                  }} disabled={config.enabled || !imapImportText.trim()}>
-                    <Upload className="size-4" />
-                    导入文本
+                    保存登录
                   </Button>
                 </div>
               </div>
 
               <div className="max-h-52 overflow-y-auto border border-stone-100 bg-white">
                 {imapAccounts.length === 0 ? (
-                  <div className="p-3 text-sm text-stone-500">IMAP 账号池为空</div>
+                  <div className="p-3 text-sm text-stone-500">未保存收信账号</div>
                 ) : (
                   imapAccounts.map((account) => (
                     <div key={account.email} className="grid grid-cols-[1fr_auto] items-center gap-3 border-b border-stone-100 px-3 py-2 last:border-b-0">
                       <div className="min-w-0">
                         <div className="truncate font-mono text-xs text-stone-800">{account.email}</div>
-                        <div className="mt-1 truncate font-mono text-xs text-stone-500">{account.password}</div>
+                        <div className="mt-1 truncate text-xs text-stone-500">{imapProviderKind === "icloud" ? "App 专用密码已保存" : "授权码已保存"}</div>
                       </div>
                       <button type="button" className="rounded-lg p-2 text-stone-400 transition hover:bg-rose-50 hover:text-rose-500 disabled:opacity-50" onClick={() => updateImapAccounts(imapAccounts.filter((item) => item.email !== account.email))} disabled={config.enabled} title="删除">
                         <Trash2 className="size-4" />
