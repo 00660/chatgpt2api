@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { transform } from "esbuild";
 
 const chunksDir = join(process.cwd(), "out", "_next", "static", "chunks");
-const legacyTarget = ["ios11"];
+const legacyTarget = ["es2020"];
 const globalThisShim = '(function(){if(typeof globalThis==="undefined"){this.globalThis=this;}}).call(typeof self!=="undefined"?self:typeof window!=="undefined"?window:this);';
 
 async function listJavaScriptFiles(dir) {
@@ -28,6 +28,11 @@ for (const file of files) {
   const result = await transform(source, {
     loader: "js",
     target: legacyTarget,
+    supported: {
+      "nullish-coalescing": false,
+      "optional-catch-binding": false,
+      "optional-chain": false,
+    },
     minify: true,
     charset: "utf8",
     legalComments: "none",
