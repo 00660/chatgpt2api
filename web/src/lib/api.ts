@@ -363,6 +363,12 @@ export type RegisterConfig = {
     wait_timeout: number;
     wait_interval: number;
   };
+  imap_dispatch?: {
+    enabled: boolean;
+    configured_total: number;
+    updated_at?: number;
+    items: Array<Record<string, unknown>>;
+  };
   proxy: string;
   proxy_mode: "direct" | "manual" | "mihomo";
   mihomo?: Record<string, unknown>;

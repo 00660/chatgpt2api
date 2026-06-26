@@ -30,7 +30,7 @@ config = {
         "providers": [],
     },
     "scheduler": {
-        "fetch_otp_url": "http://192.168.2.204:8790/router/fetch-email-otp",
+        "fetch_otp_url": "",
         "request_timeout": 8,
         "wait_timeout": 120,
         "wait_interval": 2,
@@ -266,7 +266,7 @@ def create_mailbox(username: str | None = None) -> dict:
 def _scheduler_config() -> dict:
     source = config.get("scheduler") if isinstance(config.get("scheduler"), dict) else {}
     return {
-        "fetch_otp_url": str(source.get("fetch_otp_url") or "").strip(),
+        "fetch_otp_url": "",
         "request_timeout": max(1, int(source.get("request_timeout") or config["mail"].get("request_timeout") or 8)),
         "wait_timeout": max(1, int(source.get("wait_timeout") or config["mail"].get("wait_timeout") or 120)),
         "wait_interval": max(1.0, float(source.get("wait_interval") or config["mail"].get("wait_interval") or 2)),
@@ -277,64 +277,12 @@ def build_existing_mailbox(address: str, not_before: float | None = None) -> dic
     email = str(address or "").strip().lower()
     if not email:
         raise RuntimeError("缺少邮箱地址")
-    return {
-        "provider": "scheduler",
-        "address": email,
-        "not_before": float(not_before) if not_before is not None else time.time(),
-    }
-
-
-def wait_for_scheduler_code(email: str, not_before: float | None = None, label: str = "路由器注册取码") -> str | None:
-    target_email = str(email or "").strip().lower()
-    if not target_email:
-        raise RuntimeError("调度台取码缺少邮箱地址")
-    scheduler = _scheduler_config()
-    fetch_url = scheduler["fetch_otp_url"]
-    if not fetch_url:
-        raise RuntimeError("调度台取码地址为空")
-    seen_codes: set[str] = set()
-    started_at = float(not_before) if not_before is not None else time.time()
-    deadline = time.monotonic() + float(scheduler["wait_timeout"])
-    fetch_timeout_seconds = max(1.0, min(float(scheduler["wait_interval"]) + 0.5, 4.0))
-    last_error = ""
-    while time.monotonic() < deadline:
-        try:
-            resp = requests.post(
-                fetch_url,
-                json={
-                    "email": target_email,
-                    "not_before": started_at,
-                    "exclude_codes": sorted(seen_codes),
-                    "timeout_seconds": fetch_timeout_seconds,
-                    "label": label,
-                },
-                timeout=scheduler["request_timeout"],
-                verify=False,
-            )
-            data = _response_json(resp)
-            if resp.status_code >= 400:
-                last_error = f"调度台取码 HTTP {resp.status_code}: {str(getattr(resp, 'text', '') or '')[:300]}"
-            elif data.get("ok"):
-                code = str(data.get("code") or "").strip()
-                if code:
-                    seen_codes.add(code)
-                    return code
-                last_error = str(data.get("error") or data.get("reason") or "调度台未返回验证码").strip()
-            else:
-                last_error = str(data.get("error") or data.get("reason") or "调度台暂无验证码").strip()
-        except Exception as exc:
-            last_error = str(exc).strip()
-        time.sleep(float(scheduler["wait_interval"]))
-    if last_error:
-        log(f"{target_email} 调度台取码超时: {last_error}", "yellow")
-    return None
+    mailbox = mail_provider.get_existing_mailbox(_mail_config(), email)
+    mailbox["not_before"] = float(not_before) if not_before is not None else time.time()
+    return mailbox
 
 
 def wait_for_code(mailbox: dict, label: str = "路由器注册取码") -> str | None:
-    scheduler = _scheduler_config()
-    target_email = str((mailbox or {}).get("address") or "").strip().lower()
-    if scheduler["fetch_otp_url"] and target_email:
-        return wait_for_scheduler_code(target_email, (mailbox or {}).get("not_before"), label)
     return mail_provider.wait_for_code(_mail_config(), mailbox)
 
 
@@ -887,7 +835,8 @@ class PlatformRegistrar:
                 login_referer = self._send_login_otp(index, login_session, login_device_id, continue_url)
                 self._open_login_verify_page(login_referer, index, login_session)
                 step(index, "开始等待独立登录验证码")
-                code = wait_for_scheduler_code(email, time.time() - 2, "路由器补 login 取码")
+                mailbox = build_existing_mailbox(email, time.time() - 2)
+                code = wait_for_code(mailbox, "路由器补 login 取码")
                 if not code:
                     raise RuntimeError("独立登录等待验证码超时")
                 step(index, f"收到独立登录验证码: {code}")

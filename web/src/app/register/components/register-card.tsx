@@ -12,6 +12,23 @@ import { Textarea } from "@/components/ui/textarea";
 
 import { useSettingsStore } from "../../settings/store";
 
+function providerAccountsText(value: unknown) {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item === "object") {
+          const row = item as Record<string, unknown>;
+          return `${String(row.email || row.address || "")}----${String(row.password || "")}`;
+        }
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  return String(value || "");
+}
+
 function statusClass(status: string) {
   if (status === "success") return "bg-emerald-50 text-emerald-700";
   if (status === "running" || status === "queued") return "bg-sky-50 text-sky-700";
@@ -19,7 +36,12 @@ function statusClass(status: string) {
   return "bg-stone-100 text-stone-600";
 }
 
-export function RegisterCard() {
+function formatUnixTime(value: unknown) {
+  const ts = Number(value) || 0;
+  return ts > 0 ? new Date(ts * 1000).toLocaleTimeString() : "-";
+}
+
+export function RegisterCard({ initialTab = "queue" }: { initialTab?: "queue" | "scheduler" | "recovery" | "mimo" }) {
   const [queueText, setQueueText] = useState("");
   const [recoveryText, setRecoveryText] = useState("");
   const config = useSettingsStore((state) => state.registerConfig);
@@ -33,6 +55,10 @@ export function RegisterCard() {
   const setTargetAvailable = useSettingsStore((state) => state.setRegisterTargetAvailable);
   const setCheckInterval = useSettingsStore((state) => state.setRegisterCheckInterval);
   const setSchedulerField = useSettingsStore((state) => state.setRegisterSchedulerField);
+  const setMailField = useSettingsStore((state) => state.setRegisterMailField);
+  const addProvider = useSettingsStore((state) => state.addRegisterProvider);
+  const updateProvider = useSettingsStore((state) => state.updateRegisterProvider);
+  const deleteProvider = useSettingsStore((state) => state.deleteRegisterProvider);
   const setProxyMode = useSettingsStore((state) => state.setRegisterProxyMode);
   const setMimoField = useSettingsStore((state) => state.setRegisterMimoField);
   const importQueue = useSettingsStore((state) => state.importRegisterQueueText);
@@ -62,8 +88,11 @@ export function RegisterCard() {
   const queueItems = config.queue_items || [];
   const failedItems = config.failed_items || [];
   const scheduler = config.scheduler || { fetch_otp_url: "", request_timeout: 8, wait_timeout: 120, wait_interval: 2 };
+  const mail = config.mail || { request_timeout: 30, wait_timeout: 120, wait_interval: 2, providers: [] };
   const mimo = (config.mimo || config.mihomo || {}) as Record<string, unknown>;
   const proxyStatus = (config.proxy_status || {}) as Record<string, unknown>;
+  const imapDispatch = (config.imap_dispatch || {}) as Record<string, unknown>;
+  const imapDispatchItems = Array.isArray(imapDispatch.items) ? imapDispatch.items as Array<Record<string, unknown>> : [];
   const listenerLines = Array.isArray(proxyStatus.selected_proxy_speed_lines) ? proxyStatus.selected_proxy_speed_lines.map(String) : [];
   const selectedFailedIds = failedItems.filter((item) => item.status !== "running" && item.status !== "success").map((item) => item.id);
 
@@ -85,7 +114,7 @@ export function RegisterCard() {
           </Button>
         </div>
 
-        <Tabs defaultValue="queue" className="min-h-0">
+        <Tabs defaultValue={initialTab} className="min-h-0">
           <TabsList className="grid h-auto w-full grid-cols-4 rounded-xl bg-stone-100 p-1">
             <TabsTrigger value="queue" className="h-9 rounded-lg">注册队列</TabsTrigger>
             <TabsTrigger value="scheduler" className="h-9 rounded-lg">调度台</TabsTrigger>
@@ -169,22 +198,98 @@ export function RegisterCard() {
 
           <TabsContent value="scheduler" className="mt-4 space-y-4">
             <div className="grid gap-4 md:grid-cols-2">
-              <div className="space-y-2 md:col-span-2">
-                <label className="text-sm text-stone-700">取码接口</label>
-                <Input value={scheduler.fetch_otp_url} onChange={(event) => setSchedulerField("fetch_otp_url", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
-              </div>
               <div className="space-y-2">
-                <label className="text-sm text-stone-700">请求超时</label>
-                <Input value={String(scheduler.request_timeout || "")} onChange={(event) => setSchedulerField("request_timeout", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+                <label className="text-sm text-stone-700">IMAP 请求超时</label>
+                <Input value={String(mail.request_timeout || scheduler.request_timeout || "")} onChange={(event) => { setMailField("request_timeout", event.target.value); setSchedulerField("request_timeout", event.target.value); }} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
               </div>
               <div className="space-y-2">
                 <label className="text-sm text-stone-700">等待验证码超时</label>
-                <Input value={String(scheduler.wait_timeout || "")} onChange={(event) => setSchedulerField("wait_timeout", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+                <Input value={String(mail.wait_timeout || scheduler.wait_timeout || "")} onChange={(event) => { setMailField("wait_timeout", event.target.value); setSchedulerField("wait_timeout", event.target.value); }} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
               </div>
               <div className="space-y-2">
                 <label className="text-sm text-stone-700">轮询间隔</label>
-                <Input value={String(scheduler.wait_interval || "")} onChange={(event) => setSchedulerField("wait_interval", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+                <Input value={String(mail.wait_interval || scheduler.wait_interval || "")} onChange={(event) => { setMailField("wait_interval", event.target.value); setSchedulerField("wait_interval", event.target.value); }} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
               </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-3 border-t border-stone-200 pt-4">
+              <div className="text-sm font-medium text-stone-800">IMAP 账号池</div>
+              <Button variant="outline" className="h-9 rounded-xl border-stone-200 bg-white px-3 text-stone-700" onClick={() => addProvider()} disabled={config.enabled}>
+                <UserPlus className="size-4" />
+                添加 IMAP
+              </Button>
+            </div>
+
+            <div className="space-y-2 border border-stone-200 bg-white/70 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-sm font-medium text-stone-800">轮播取码状态</div>
+                <Badge variant={imapDispatchItems.length > 0 ? "success" : "secondary"} className="rounded-md">
+                  {imapDispatchItems.length} 个收件箱
+                </Badge>
+              </div>
+              {imapDispatchItems.length === 0 ? (
+                <div className="text-sm text-stone-500">暂无 IMAP 收件箱状态</div>
+              ) : (
+                <div className="max-h-52 overflow-y-auto border border-stone-100 bg-white">
+                  {imapDispatchItems.map((item, index) => {
+                    const lastError = String(item.last_error || "");
+                    return (
+                      <div key={String(item.identity_key || index)} className="grid grid-cols-[1fr_auto] gap-3 border-b border-stone-100 px-3 py-2 last:border-b-0">
+                        <div className="min-w-0">
+                          <div className="truncate font-mono text-xs text-stone-800">{String(item.mailbox || "-")}</div>
+                          <div className="mt-1 truncate text-xs text-stone-500">
+                            {String(item.host || "-")}:{String(item.port || "-")} / 目标 {String(item.active_target || "-")}
+                          </div>
+                          <div className={lastError ? "mt-1 truncate text-xs text-rose-600" : "mt-1 truncate text-xs text-stone-500"}>
+                            {lastError || `最近验证码 ${String(item.last_event_code || "-")} / ${String(item.last_event_target || "-")}`}
+                          </div>
+                        </div>
+                        <div className="text-right text-xs text-stone-500">
+                          <div>{formatUnixTime(item.last_scan_at)}</div>
+                          <div>{Number(item.total_event_count || 0)} 次</div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-3">
+              {(mail.providers || []).length === 0 ? (
+                <div className="border border-stone-200 bg-white/70 p-4 text-sm text-stone-500">IMAP 账号池为空</div>
+              ) : (
+                (mail.providers || []).map((provider, index) => {
+                  const row = provider as Record<string, unknown>;
+                  return (
+                    <div key={index} className="space-y-3 border border-stone-200 bg-white/70 p-3">
+                      <div className="grid gap-3 md:grid-cols-[1fr_120px_90px_auto]">
+                        <div className="space-y-2">
+                          <label className="text-sm text-stone-700">IMAP Host</label>
+                          <Input value={String(row.imap_host || row.host || "")} onChange={(event) => updateProvider(index, { type: "imap", imap_host: event.target.value })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+                        </div>
+                        <div className="space-y-2">
+                          <label className="text-sm text-stone-700">端口</label>
+                          <Input value={String(row.imap_port || row.port || 993)} onChange={(event) => updateProvider(index, { type: "imap", imap_port: Number(event.target.value) || 993 })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+                        </div>
+                        <div className="space-y-2">
+                          <label className="text-sm text-stone-700">邮件数</label>
+                          <Input value={String(row.message_limit || 20)} onChange={(event) => updateProvider(index, { type: "imap", message_limit: Number(event.target.value) || 20 })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+                        </div>
+                        <div className="flex items-end">
+                          <button type="button" className="rounded-lg p-2 text-stone-400 transition hover:bg-rose-50 hover:text-rose-500 disabled:opacity-50" onClick={() => deleteProvider(index)} disabled={config.enabled} title="删除">
+                            <Trash2 className="size-4" />
+                          </button>
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-sm text-stone-700">账号文本</label>
+                        <Textarea value={providerAccountsText(row.accounts || row.mailboxes || row.pool)} onChange={(event) => updateProvider(index, { enable: true, type: "imap", accounts: event.target.value })} placeholder={"每行一个账号：\nemail@example.com----password"} className="min-h-24 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
+                      </div>
+                    </div>
+                  );
+                })
+              )}
             </div>
           </TabsContent>
 

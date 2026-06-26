@@ -48,7 +48,7 @@ def _random_password(length: int = 16) -> str:
 
 def _default_scheduler() -> dict:
     return {
-        "fetch_otp_url": "http://192.168.2.204:8790/router/fetch-email-otp",
+        "fetch_otp_url": "",
         "request_timeout": 8,
         "wait_timeout": 120,
         "wait_interval": 2,
@@ -100,7 +100,7 @@ def _normalize_scheduler(value: Any) -> dict:
     source = value if isinstance(value, dict) else {}
     default = _default_scheduler()
     return {
-        "fetch_otp_url": str(source.get("fetch_otp_url") or default["fetch_otp_url"]).strip(),
+        "fetch_otp_url": "",
         "request_timeout": _safe_int(source.get("request_timeout"), default["request_timeout"], 1),
         "wait_timeout": _safe_int(source.get("wait_timeout"), default["wait_timeout"], 1),
         "wait_interval": _safe_int(source.get("wait_interval"), default["wait_interval"], 1),
@@ -305,6 +305,7 @@ class RegisterService:
                 )
             )
         snapshot["proxy_status"] = get_register_proxy_status(self._config)
+        snapshot["imap_dispatch"] = mail_provider.imap_dispatch_snapshot(self._config.get("mail") or {})
         return snapshot
 
     def update(self, updates: dict) -> dict:

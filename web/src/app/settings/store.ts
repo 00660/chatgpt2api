@@ -261,8 +261,14 @@ function normalizeFiles(items: CPARemoteFile[]) {
 
 function buildRegisterUpdate(registerConfig: RegisterConfig): Partial<RegisterConfig> {
   return {
+    mail: {
+      request_timeout: Math.max(1, Number(registerConfig.mail?.request_timeout) || 30),
+      wait_timeout: Math.max(1, Number(registerConfig.mail?.wait_timeout) || 120),
+      wait_interval: Math.max(1, Number(registerConfig.mail?.wait_interval) || 2),
+      providers: registerConfig.mail?.providers || [],
+    },
     scheduler: {
-      fetch_otp_url: String(registerConfig.scheduler?.fetch_otp_url || "").trim(),
+      fetch_otp_url: "",
       request_timeout: Math.max(1, Number(registerConfig.scheduler?.request_timeout) || 8),
       wait_timeout: Math.max(1, Number(registerConfig.scheduler?.wait_timeout) || 120),
       wait_interval: Math.max(1, Number(registerConfig.scheduler?.wait_interval) || 2),
@@ -1004,7 +1010,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
           ...state.registerConfig.mail,
           providers: [
             ...(state.registerConfig.mail.providers || []),
-            { enable: true, type: "cloudmail_gen", api_base: "", admin_email: "", admin_password: "", domain: [], subdomain: [], email_prefix: "" },
+            { enable: true, type: "imap", imap_host: "", imap_port: 993, ssl: true, folder: "INBOX", message_limit: 20, accounts: "" },
           ],
         },
       },

@@ -10,7 +10,7 @@ import time
 from datetime import datetime, timezone
 from email import message_from_bytes, message_from_string, policy
 from email.header import decode_header, make_header
-from email.utils import parsedate_to_datetime
+from email.utils import getaddresses, parsedate_to_datetime
 from threading import Lock
 from typing import Any, Callable, TypeVar
 
@@ -24,6 +24,12 @@ _ddg_aliases_lock = Lock()
 
 OUTLOOK_TOKEN_USED_FILE = DATA_DIR / "outlook_token_used.json"
 _outlook_token_state_lock = Lock()
+IMAP_DISPATCH_STATE_FILE = DATA_DIR / "imap_dispatch_state.json"
+IMAP_EVENT_CACHE_FILE = DATA_DIR / "imap_event_cache.json"
+_imap_dispatch_state_lock = Lock()
+_imap_event_cache_lock = Lock()
+IMAP_EVENT_CACHE_MAX = 800
+IMAP_EVENT_MAX_AGE_SECONDS = 24 * 60 * 60
 # in_use 超过该秒数视为陈旧（注册进程崩溃残留），可被重新领用
 OUTLOOK_IN_USE_STALE_SECONDS = 3600
 OUTLOOK_RECORDED_STATES = {"used", "in_use", "token_invalid", "failed"}
@@ -206,8 +212,10 @@ def outlook_token_pool_stats(pool: list[dict[str, str]] | None = None) -> dict[s
 ResultT = TypeVar("ResultT")
 domain_lock = Lock()
 provider_lock = Lock()
+imap_dispatch_lock = Lock()
 domain_index = 0
 provider_index = 0
+imap_dispatch_index = 0
 cloudmail_token_lock = Lock()
 cloudmail_token_cache: dict[str, tuple[str, float]] = {}
 
@@ -1116,6 +1124,576 @@ def _normalize_outlook_pool(value: Any) -> list[dict[str, str]]:
     return []
 
 
+def parse_imap_accounts(text: str) -> list[dict[str, str]]:
+    """解析普通 IMAP 账号池，每行 email----password。"""
+    accounts: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw_line in str(text or "").splitlines():
+        line = _clean_outlook_value(raw_line)
+        if not line or line.startswith("#"):
+            continue
+        if "----" in line:
+            parts = [_clean_outlook_value(part) for part in line.split("----", 1)]
+        elif "|" in line:
+            parts = [_clean_outlook_value(part) for part in line.split("|", 1)]
+        elif "\t" in line:
+            parts = [_clean_outlook_value(part) for part in line.split("\t", 1)]
+        elif "," in line:
+            parts = [_clean_outlook_value(part) for part in line.split(",", 1)]
+        else:
+            parts = [_clean_outlook_value(part) for part in re.split(r"\s+", line, maxsplit=1)]
+        if len(parts) < 2:
+            continue
+        email, password = parts[0], parts[1]
+        key = email.lower()
+        if "@" not in email or not password or key in seen:
+            continue
+        seen.add(key)
+        accounts.append({"email": email, "password": password})
+    return accounts
+
+
+def _normalize_imap_accounts(value: Any) -> list[dict[str, str]]:
+    if isinstance(value, str):
+        return parse_imap_accounts(value)
+    if isinstance(value, list):
+        items: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for item in value:
+            if isinstance(item, str):
+                for account in parse_imap_accounts(item):
+                    key = account["email"].lower()
+                    if key not in seen:
+                        seen.add(key)
+                        items.append(account)
+            elif isinstance(item, dict):
+                email = _clean_outlook_value(item.get("email") or item.get("address") or item.get("username") or "")
+                password = _clean_outlook_value(item.get("password") or "")
+                key = email.lower()
+                if "@" in email and password and key not in seen:
+                    seen.add(key)
+                    items.append({"email": email, "password": password})
+        return items
+    return []
+
+
+class ImapMailProvider(BaseMailProvider):
+    """普通 IMAP 账号池，用于本机调度台按邮箱地址读取验证码。"""
+
+    name = "imap"
+
+    def __init__(self, entry: dict, conf: dict):
+        super().__init__(conf, str(entry.get("provider_ref") or ""))
+        self.label = str(entry.get("label") or self.provider_ref)
+        self.accounts = _normalize_imap_accounts(entry.get("accounts") or entry.get("mailboxes") or entry.get("pool"))
+        self.host = str(entry.get("imap_host") or entry.get("host") or "").strip()
+        self.port = int(entry.get("imap_port") or entry.get("port") or 993)
+        self.use_ssl = bool(entry.get("ssl", True))
+        self.folder = str(entry.get("folder") or "INBOX").strip() or "INBOX"
+        self.message_limit = max(1, int(entry.get("message_limit") or 20))
+
+    def _find_account(self, email: str = "") -> dict[str, str]:
+        target = str(email or "").strip().lower()
+        if not self.accounts:
+            raise RuntimeError("IMAP 调度台账号池为空，请先添加 email----password")
+        if target:
+            account = next((item for item in self.accounts if item["email"].strip().lower() == target), None)
+            if account is None:
+                raise RuntimeError(f"[{self.label}] IMAP 调度台未找到邮箱 {target}")
+            return account
+        return self.accounts[0]
+
+    def create_mailbox(self, username: str | None = None) -> dict[str, Any]:
+        account = self._find_account(username or "")
+        return {"provider": self.name, "provider_ref": self.provider_ref, "address": account["email"], "password": account["password"], "label": self.label}
+
+    def get_existing_mailbox(self, email: str) -> dict[str, Any]:
+        account = self._find_account(email)
+        return {"provider": self.name, "provider_ref": self.provider_ref, "address": account["email"], "password": account["password"], "label": self.label}
+
+    def dispatch_mailboxes(self) -> list[dict[str, Any]]:
+        return [
+            {"provider": self.name, "provider_ref": self.provider_ref, "address": account["email"], "password": account["password"], "label": self.label}
+            for account in self.accounts
+        ]
+
+    def _connect(self):
+        if not self.host:
+            raise RuntimeError(f"[{self.label}] IMAP host 不能为空")
+        if self.use_ssl:
+            return imaplib.IMAP4_SSL(self.host, self.port)
+        return imaplib.IMAP4(self.host, self.port)
+
+    def _search_recent_uids(self, imap, target_email: str = "") -> list[bytes]:
+        status, data = imap.uid("search", None, "ALL")
+        if status != "OK" or not data or not data[0]:
+            return []
+        all_uids = data[0].split()
+        target = str(target_email or "").strip().lower()
+        if not target:
+            return all_uids[-self.message_limit :]
+
+        matched: list[bytes] = []
+        seen: set[bytes] = set()
+        for criteria in (
+            ("TO", f'"{target}"'),
+            ("HEADER", "Delivered-To", f'"{target}"'),
+            ("HEADER", "X-Original-To", f'"{target}"'),
+            ("HEADER", "Envelope-To", f'"{target}"'),
+            ("HEADER", "X-Forwarded-To", f'"{target}"'),
+        ):
+            try:
+                search_status, search_data = imap.uid("search", None, *criteria)
+            except Exception:
+                continue
+            if search_status != "OK" or not search_data or not search_data[0]:
+                continue
+            for uid in search_data[0].split():
+                if uid not in seen:
+                    seen.add(uid)
+                    matched.append(uid)
+        if matched:
+            return matched[-self.message_limit :]
+        return all_uids[-self.message_limit :]
+
+    def fetch_recent_messages(self, mailbox: dict[str, Any], target_email: str = "") -> list[dict[str, Any]]:
+        address = str(mailbox.get("address") or "").strip()
+        password = str(mailbox.get("password") or "").strip()
+        if not address or not password:
+            raise RuntimeError("IMAP mailbox 缺少 address 或 password")
+        imap = self._connect()
+        try:
+            imap.login(address, password)
+            status, _ = imap.select(self.folder, readonly=True)
+            if status != "OK":
+                raise RuntimeError(f"IMAP select {self.folder} 失败")
+            uids = self._search_recent_uids(imap, target_email)
+            if not uids:
+                return []
+            messages: list[dict[str, Any]] = []
+            for uid in reversed(uids):
+                status, fetched = imap.uid("fetch", uid, "(RFC822)")
+                if status != "OK":
+                    continue
+                raw_payload = next((part[1] for part in fetched if isinstance(part, tuple) and isinstance(part[1], bytes)), b"")
+                if raw_payload:
+                    messages.append(self._parse_message(address, raw_payload))
+            return messages
+        finally:
+            try:
+                imap.logout()
+            except Exception:
+                pass
+
+    def _parse_message(self, address: str, raw: bytes) -> dict[str, Any]:
+        message = message_from_bytes(raw, policy=policy.default)
+        try:
+            received = parsedate_to_datetime(str(message.get("Date") or ""))
+            if received and received.tzinfo is None:
+                received = received.replace(tzinfo=timezone.utc)
+        except Exception:
+            received = None
+        plain: list[str] = []
+        html: list[str] = []
+        for part in (message.walk() if message.is_multipart() else [message]):
+            if part.get_content_maintype() == "multipart":
+                continue
+            try:
+                payload = part.get_content()
+            except Exception:
+                continue
+            if not payload:
+                continue
+            if part.get_content_type() == "text/html":
+                html.append(str(payload))
+            else:
+                plain.append(str(payload))
+
+        def _decode(value: str | None) -> str:
+            if not value:
+                return ""
+            try:
+                return str(make_header(decode_header(value)))
+            except Exception:
+                return value
+
+        return {
+            "provider": self.name,
+            "mailbox": address,
+            "message_id": _decode(str(message.get("Message-ID") or "")),
+            "subject": _decode(str(message.get("Subject") or "")),
+            "sender": _decode(str(message.get("From") or "")),
+            "to": _decode(str(message.get("To") or "")),
+            "cc": _decode(str(message.get("Cc") or "")),
+            "delivered_to": _decode(str(message.get("Delivered-To") or "")),
+            "x_original_to": _decode(str(message.get("X-Original-To") or "")),
+            "envelope_to": _decode(str(message.get("Envelope-To") or "")),
+            "x_forwarded_to": _decode(str(message.get("X-Forwarded-To") or "")),
+            "text_content": "\n".join(plain).strip(),
+            "html_content": "\n".join(html).strip(),
+            "received_at": received,
+            "raw": None,
+        }
+
+    def wait_for_code(self, mailbox: dict[str, Any]) -> str | None:
+        seen_value = mailbox.setdefault("_seen_code_message_refs", [])
+        if not isinstance(seen_value, list):
+            seen_value = []
+            mailbox["_seen_code_message_refs"] = seen_value
+        seen_refs = {str(item) for item in seen_value}
+        not_before = float(mailbox.get("not_before") or 0)
+        deadline = time.monotonic() + self.conf["wait_timeout"]
+        while time.monotonic() < deadline:
+            for message in self.fetch_recent_messages(mailbox):
+                received_at = message.get("received_at")
+                if not_before and isinstance(received_at, datetime) and received_at.timestamp() < not_before:
+                    continue
+                ref = _message_tracking_ref(message)
+                if ref in seen_refs:
+                    continue
+                code = _extract_code(message)
+                if code:
+                    seen_value.append(ref)
+                    return code
+                seen_refs.add(ref)
+            time.sleep(max(0.2, self.conf["wait_interval"]))
+        return None
+
+
+def _extract_email_addresses(values: list[str]) -> list[str]:
+    candidates: list[str] = []
+    for _name, address in getaddresses(values):
+        address = str(address or "").strip().lower()
+        if "@" in address:
+            candidates.append(address)
+    text = "\n".join(values)
+    candidates.extend(item.lower() for item in re.findall(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", text, re.I))
+    out: list[str] = []
+    seen: set[str] = set()
+    for email in candidates:
+        email = email.strip(" <>\"'.,;:()[]{}").lower()
+        if not email or email in seen:
+            continue
+        seen.add(email)
+        out.append(email)
+    return out
+
+
+def _message_candidate_emails(message: dict[str, Any]) -> list[str]:
+    mailbox_email = str(message.get("mailbox") or "").strip().lower()
+    header_values = [
+        str(message.get(key) or "")
+        for key in ("to", "cc", "delivered_to", "x_original_to", "envelope_to", "x_forwarded_to")
+        if message.get(key)
+    ]
+    header_emails = _extract_email_addresses(header_values)
+    if header_emails:
+        non_mailbox = [email for email in header_emails if email != mailbox_email]
+        return non_mailbox or header_emails
+
+    body_values = [
+        str(message.get(key) or "")
+        for key in ("subject", "sender", "text_content", "html_content")
+        if message.get(key)
+    ]
+    extracted = _extract_email_addresses(body_values)
+    filtered = [
+        email
+        for email in extracted
+        if email != mailbox_email
+        and not email.endswith("@tm.openai.com")
+        and not email.endswith("@tm1.openai.com")
+        and not email.endswith("@openai.com")
+    ]
+    return filtered or [email for email in extracted if email != mailbox_email] or extracted
+
+
+def _message_targets_email(message: dict[str, Any], email: str) -> bool:
+    target = str(email or "").strip().lower()
+    if not target:
+        return False
+    return target in _message_candidate_emails(message)
+
+
+def _imap_dispatch_identity(entry: dict, mailbox: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(entry.get("provider_ref") or entry.get("label") or ""),
+            str(entry.get("imap_host") or entry.get("host") or "").strip().lower(),
+            str(entry.get("imap_port") or entry.get("port") or 993),
+            str(entry.get("folder") or "INBOX"),
+            str(mailbox.get("address") or "").strip().lower(),
+        ]
+    )
+
+
+def _load_imap_event_cache() -> list[dict[str, Any]]:
+    try:
+        if not IMAP_EVENT_CACHE_FILE.exists():
+            return []
+        payload = json.loads(IMAP_EVENT_CACHE_FILE.read_text(encoding="utf-8"))
+        events = payload.get("events") if isinstance(payload, dict) else []
+        return [item for item in events if isinstance(item, dict)]
+    except Exception:
+        return []
+
+
+def _save_imap_event_cache(events: list[dict[str, Any]]) -> None:
+    IMAP_EVENT_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    min_ts = now - IMAP_EVENT_MAX_AGE_SECONDS
+    pruned: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for event in reversed(events):
+        key = str(event.get("key") or "")
+        ts = float(event.get("ts") or 0)
+        if not key or key in seen:
+            continue
+        if ts and ts < min_ts:
+            continue
+        seen.add(key)
+        pruned.append(event)
+        if len(pruned) >= IMAP_EVENT_CACHE_MAX:
+            break
+    pruned.reverse()
+    IMAP_EVENT_CACHE_FILE.write_text(json.dumps({"updated_at": now, "events": pruned}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _record_imap_dispatch_event(entry: dict, mailbox: dict[str, Any], message: dict[str, Any], code: str) -> dict[str, Any]:
+    received_at = message.get("received_at")
+    ts = received_at.timestamp() if isinstance(received_at, datetime) else time.time()
+    event = {
+        "key": f"{_imap_dispatch_identity(entry, mailbox)}|{_message_tracking_ref(message)}|{code}",
+        "ts": ts,
+        "code": code,
+        "subject": str(message.get("subject") or "")[:200],
+        "target_emails": _message_candidate_emails(message),
+        "mailbox": str(mailbox.get("address") or "").strip().lower(),
+        "host": str(entry.get("imap_host") or entry.get("host") or "").strip().lower(),
+        "port": int(entry.get("imap_port") or entry.get("port") or 993),
+        "folder": str(entry.get("folder") or "INBOX"),
+        "identity_key": _imap_dispatch_identity(entry, mailbox),
+        "recorded_at": time.time(),
+    }
+    with _imap_event_cache_lock:
+        events = _load_imap_event_cache()
+        events.append(event)
+        _save_imap_event_cache(events)
+    return event
+
+
+def _find_cached_imap_dispatch_code(target_email: str, *, not_before: float = 0.0, seen_refs: set[str] | None = None) -> str | None:
+    target = str(target_email or "").strip().lower()
+    if not target:
+        return None
+    seen = seen_refs or set()
+    with _imap_event_cache_lock:
+        events = _load_imap_event_cache()
+    for event in reversed(events):
+        code = str(event.get("code") or "").strip()
+        if not code:
+            continue
+        key = str(event.get("key") or "")
+        if key and key in seen:
+            continue
+        ts = float(event.get("ts") or 0)
+        if ts and not_before and ts + 5 < not_before:
+            continue
+        targets = {str(item or "").strip().lower() for item in (event.get("target_emails") or [])}
+        if target in targets:
+            return code
+    return None
+
+
+def _update_imap_dispatch_state(entry: dict, mailbox: dict[str, Any], **updates: Any) -> None:
+    identity_key = _imap_dispatch_identity(entry, mailbox)
+    now = time.time()
+    with _imap_dispatch_state_lock:
+        try:
+            payload = json.loads(IMAP_DISPATCH_STATE_FILE.read_text(encoding="utf-8")) if IMAP_DISPATCH_STATE_FILE.exists() else {}
+        except Exception:
+            payload = {}
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(items, dict):
+            items = {}
+        current = items.get(identity_key) if isinstance(items.get(identity_key), dict) else {}
+        current.update(
+            {
+                "identity_key": identity_key,
+                "mailbox": str(mailbox.get("address") or "").strip().lower(),
+                "host": str(entry.get("imap_host") or entry.get("host") or "").strip(),
+                "port": int(entry.get("imap_port") or entry.get("port") or 993),
+                "folder": str(entry.get("folder") or "INBOX"),
+                "updated_at": now,
+                **updates,
+            }
+        )
+        items[identity_key] = current
+        IMAP_DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        IMAP_DISPATCH_STATE_FILE.write_text(json.dumps({"updated_at": now, "items": items}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _load_imap_dispatch_state_item(identity_key: Any) -> dict[str, Any]:
+    key = str(identity_key or "")
+    if not key:
+        return {}
+    with _imap_dispatch_state_lock:
+        try:
+            payload = json.loads(IMAP_DISPATCH_STATE_FILE.read_text(encoding="utf-8")) if IMAP_DISPATCH_STATE_FILE.exists() else {}
+        except Exception:
+            return {}
+    items = payload.get("items") if isinstance(payload, dict) else {}
+    item = items.get(key) if isinstance(items, dict) else {}
+    return dict(item) if isinstance(item, dict) else {}
+
+
+def imap_dispatch_snapshot(mail_config: dict) -> dict[str, Any]:
+    entries = _enabled_imap_entries(mail_config)
+    configured: dict[str, dict[str, Any]] = {}
+    conf = _config(mail_config)
+    for entry in entries:
+        provider = ImapMailProvider(entry, conf)
+        try:
+            for mailbox in provider.dispatch_mailboxes():
+                key = _imap_dispatch_identity(entry, mailbox)
+                configured[key] = {
+                    "identity_key": key,
+                    "mailbox": str(mailbox.get("address") or "").strip().lower(),
+                    "host": str(entry.get("imap_host") or entry.get("host") or "").strip(),
+                    "port": int(entry.get("imap_port") or entry.get("port") or 993),
+                    "folder": str(entry.get("folder") or "INBOX"),
+                    "configured": True,
+                    "running": False,
+                    "active_target": "",
+                    "last_scan_at": 0.0,
+                    "last_error": "",
+                    "last_event_at": 0.0,
+                    "last_event_code": "",
+                    "last_event_target": "",
+                    "last_event_subject": "",
+                    "total_event_count": 0,
+                }
+        except Exception:
+            continue
+        finally:
+            provider.close()
+
+    try:
+        payload = json.loads(IMAP_DISPATCH_STATE_FILE.read_text(encoding="utf-8")) if IMAP_DISPATCH_STATE_FILE.exists() else {}
+    except Exception:
+        payload = {}
+    state_items = payload.get("items") if isinstance(payload, dict) else {}
+    if isinstance(state_items, dict):
+        for key, value in state_items.items():
+            if not isinstance(value, dict):
+                continue
+            if key in configured:
+                configured[key].update(value)
+            else:
+                configured[key] = {"configured": False, **value}
+    items = sorted(configured.values(), key=lambda item: (str(item.get("host") or ""), str(item.get("mailbox") or "")))
+    return {
+        "enabled": bool(entries),
+        "configured_total": len(configured),
+        "items": items,
+        "updated_at": float(payload.get("updated_at") or 0) if isinstance(payload, dict) else 0.0,
+    }
+
+
+def _enabled_imap_entries(mail_config: dict) -> list[dict]:
+    return [item for item in _entries(mail_config) if item.get("enable") and item.get("type") == "imap"]
+
+
+def build_imap_dispatch_mailbox(email: str, not_before: float | None = None) -> dict[str, Any]:
+    target = str(email or "").strip().lower()
+    if not target:
+        raise RuntimeError("IMAP 调度台缺少目标邮箱")
+    return {"provider": "imap_dispatch", "address": target, "not_before": float(not_before) if not_before is not None else time.time()}
+
+
+def wait_for_imap_dispatch_code(mail_config: dict, mailbox: dict) -> str | None:
+    target_email = str((mailbox or {}).get("address") or "").strip().lower()
+    if not target_email:
+        raise RuntimeError("IMAP 调度台取码缺少目标邮箱")
+    entries = _enabled_imap_entries(mail_config)
+    if not entries:
+        raise RuntimeError("IMAP 调度台没有启用的 IMAP 账号")
+    conf = _config(mail_config)
+    not_before = float((mailbox or {}).get("not_before") or 0)
+    deadline = time.monotonic() + conf["wait_timeout"]
+    seen_refs: set[str] = set()
+    cached_code = _find_cached_imap_dispatch_code(target_email, not_before=not_before, seen_refs=seen_refs)
+    if cached_code:
+        return cached_code
+
+    candidates: list[tuple[dict, dict[str, Any]]] = []
+    for entry in entries:
+        provider = ImapMailProvider(entry, conf)
+        try:
+            for dispatch_mailbox in provider.dispatch_mailboxes():
+                candidates.append((entry, dispatch_mailbox))
+        finally:
+            provider.close()
+    if not candidates:
+        raise RuntimeError("IMAP 调度台账号池为空，请先添加转发收件箱账号")
+
+    global imap_dispatch_index
+    while time.monotonic() < deadline:
+        with imap_dispatch_lock:
+            start = imap_dispatch_index % len(candidates)
+            imap_dispatch_index = (imap_dispatch_index + 1) % len(candidates)
+        ordered = candidates[start:] + candidates[:start]
+        for entry, dispatch_mailbox in ordered:
+            provider = ImapMailProvider(entry, conf)
+            try:
+                _update_imap_dispatch_state(
+                    entry,
+                    dispatch_mailbox,
+                    running=True,
+                    active_target=target_email,
+                    last_error="",
+                    last_scan_at=time.time(),
+                )
+                try:
+                    messages = provider.fetch_recent_messages(dispatch_mailbox, target_email=target_email)
+                except Exception as exc:
+                    _update_imap_dispatch_state(entry, dispatch_mailbox, running=False, active_target=target_email, last_error=str(exc)[:300])
+                    continue
+                for message in messages:
+                    received_at = message.get("received_at")
+                    if not_before and isinstance(received_at, datetime) and received_at.timestamp() + 5 < not_before:
+                        continue
+                    if not _message_targets_email(message, target_email):
+                        continue
+                    ref = _message_tracking_ref(message)
+                    if ref in seen_refs:
+                        continue
+                    seen_refs.add(ref)
+                    code = _extract_code(message)
+                    if code:
+                        event = _record_imap_dispatch_event(entry, dispatch_mailbox, message, code)
+                        _update_imap_dispatch_state(
+                            entry,
+                            dispatch_mailbox,
+                            running=True,
+                            active_target=target_email,
+                            last_error="",
+                            last_event_at=float(event.get("ts") or time.time()),
+                            last_event_code=code,
+                            last_event_target=",".join(event.get("target_emails") or []),
+                            last_event_subject=str(event.get("subject") or "")[:160],
+                            total_event_count=int(_load_imap_dispatch_state_item(event.get("identity_key")).get("total_event_count") or 0) + 1,
+                        )
+                        return code
+            finally:
+                provider.close()
+        cached_code = _find_cached_imap_dispatch_code(target_email, not_before=not_before, seen_refs=seen_refs)
+        if cached_code:
+            return cached_code
+        time.sleep(max(0.2, conf["wait_interval"]))
+    return None
+
+
 class OutlookTokenProvider(BaseMailProvider):
     """使用 refresh_token 读取 Outlook/Hotmail 邮箱验证码。
 
@@ -1418,6 +1996,8 @@ def _create_provider(mail_config: dict, provider: str = "", provider_ref: str = 
         return InbucketMailProvider(entry, conf)
     if entry["type"] == "yyds_mail":
         return YydsMailProvider(entry, conf)
+    if entry["type"] == "imap":
+        return ImapMailProvider(entry, conf)
     if entry["type"] == "outlook_token":
         return OutlookTokenProvider(entry, conf)
     raise RuntimeError(f"不支持的 mail.provider: {entry['type']}")
@@ -1446,6 +2026,8 @@ def create_mailbox(mail_config: dict, username: str | None = None) -> dict:
 
 
 def wait_for_code(mail_config: dict, mailbox: dict) -> str | None:
+    if str(mailbox.get("provider") or "") == "imap_dispatch":
+        return wait_for_imap_dispatch_code(mail_config, mailbox)
     provider = _create_provider(mail_config, str(mailbox.get("provider") or ""), str(mailbox.get("provider_ref") or ""))
     try:
         return provider.wait_for_code(mailbox)
@@ -1482,7 +2064,9 @@ def release_mailbox(mailbox: dict) -> None:
 
 
 def get_existing_mailbox(mail_config: dict, email: str) -> dict:
-    """通过管理员密码获取已有邮箱地址的 JWT，用于查询邮件。"""
+    """为已有目标邮箱构造取码邮箱。IMAP 调度台模式下轮播所有 IMAP 账号取码。"""
+    if _enabled_imap_entries(mail_config):
+        return build_imap_dispatch_mailbox(email)
     enabled = _enabled_entries(mail_config)
     tried: set[str] = set()
     last_error = ""
@@ -1500,8 +2084,6 @@ def get_existing_mailbox(mail_config: dict, email: str) -> dict:
                 raise RuntimeError(f"邮箱提供商 {provider.name} 不支持查询已有邮箱")
         except RuntimeError as error:
             last_error = str(error)
-            if "DDG日上限已达" not in last_error:
-                raise
         finally:
             provider.close()
     raise RuntimeError(last_error or "所有启用的邮箱提供商均无法查询已有邮箱")
